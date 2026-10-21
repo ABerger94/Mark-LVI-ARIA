@@ -86,9 +86,16 @@ def test_speak_error_has_no_butler_register():
 
 
 def test_dashboard_pages_name_aria():
+    """The statics carry the substitution tokens since Phase C3 — the
+    name is injected at serve time from get_assistant_name, so what is
+    pinned HERE is the mechanism (tokens present, no hard-coded brand
+    of either name in the title/brand spots); that the SERVED pages
+    actually read ARIA is pinned in tests/test_dashboard.py."""
     login = (ROOT / "dashboard" / "static" / "login.html").read_text(encoding="utf-8")
     app = (ROOT / "dashboard" / "static" / "app.html").read_text(encoding="utf-8")
-    assert "<title>ARIA</title>" in login
+    assert "<title>__ASSISTANT_NAME__</title>" in login
     assert "JARVIS" not in login
-    assert "<title>ARIA Dashboard</title>" in app
-    assert "Send a command to ARIA" in app
+    assert '<div class="logo">__BRAND__</div>' in login
+    assert "<title>__ASSISTANT_NAME__ Dashboard</title>" in app
+    assert "Send a command to __ASSISTANT_NAME__" in app
+    assert '<div class="logo">__BRAND__</div>' in app
