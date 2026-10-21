@@ -47,6 +47,16 @@ EXAMPLE_PHRASES = {
     "spotify":           "What's playing on Spotify?",
     "edit_own_code":     "Rewrite your startup greeting",
     "patch_own_code":    "Fix that bug in your own code",
+    "routine_record_start": "Watch me do this and save it as a routine",
+    "routine_record_stop":  "Stop recording and save that routine",
+    "run_routine":          "Run my morning setup routine",
+    "list_routines":        "What routines do you have saved?",
+    "describe_routine":     "What does my morning routine actually do?",
+    "delete_routine":       "Delete the old shutdown routine",
+    "trust_routine":        "Trust the morning routine to run on its own",
+    "untrust_routine":      "Stop trusting that routine",
+    "export_routine_pack":  "Export my routines to a file",
+    "import_routine_pack":  "Import the routines from that pack",
 }
 
 _SOURCE_ORDER = ("Built-in", "Action", "Plugin")
