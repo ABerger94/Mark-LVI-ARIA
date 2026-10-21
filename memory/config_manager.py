@@ -550,3 +550,75 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
 
     data["providers"] = block
     CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+
+# ── Connections (Phase E) ───────────────────────────────────────────────────
+# Account credentials for the services ARIA was connected to, living in
+# this same file for the same reasons everything else does: one config
+# to back up, one already in .gitignore, one place a user knows to look.
+# Every value is a portable string (an app password, a secret URL, a
+# personal access token) — nothing here is OAuth-bound, so connecting
+# is copying values in, through the *_setup actions or by hand.
+#
+# "INSERT" is treated as unset by every getter: ARIA's keys file
+# shipped with that placeholder, and a config still carrying it is an
+# unconfigured config, not a wrong credential.
+
+def _stored(key: str) -> str:
+    v = load_api_keys().get(key, "")
+    v = v.strip() if isinstance(v, str) else ""
+    return "" if v == "INSERT" else v
+
+
+# Gmail — address + app password (NOT the account password).
+
+def get_gmail_user() -> str:
+    """The connected Gmail address, or '' when not connected."""
+    return _stored("gmail_user")
+
+
+def get_gmail_app_password() -> str:
+    """The Gmail app password as stored (spaces and all), or ''."""
+    return _stored("gmail_app_password")
+
+
+def save_gmail_credentials(user: str, app_password: str) -> None:
+    _patch_config(gmail_user=(user or "").strip(),
+                  gmail_app_password=(app_password or "").strip())
+
+
+# Google Calendar — the secret iCal URL is the whole credential.
+
+def get_ical_url() -> str:
+    """The connected calendar's secret iCal URL, or ''."""
+    return _stored("ical_url")
+
+
+def save_ical_url(url: str) -> None:
+    _patch_config(ical_url=(url or "").strip())
+
+
+# GitHub — personal access token + username, behind an arming flag.
+# The flag is separate from the credential on purpose (ARIA's
+# GITHUB_ARMED): storing a token says who she is on GitHub; arming
+# says she may create repos and push files with it. Default OFF.
+
+def get_github_token() -> str:
+    return _stored("github_token")
+
+
+def get_github_username() -> str:
+    return _stored("github_username")
+
+
+def get_github_armed() -> bool:
+    return bool(load_api_keys().get("github_armed", False))
+
+
+def save_github_credentials(token: str, username: str) -> None:
+    _patch_config(github_token=(token or "").strip(),
+                  github_username=(username or "").strip())
+
+
+def save_github_armed(enabled: bool) -> None:
+    _patch_config(github_armed=bool(enabled))

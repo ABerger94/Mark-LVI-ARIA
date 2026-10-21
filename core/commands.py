@@ -57,6 +57,10 @@ EXAMPLE_PHRASES = {
     "untrust_routine":      "Stop trusting that routine",
     "export_routine_pack":  "Export my routines to a file",
     "import_routine_pack":  "Import the routines from that pack",
+    "gmail_setup":          "Set up Gmail",
+    "read_email":           "Read my email",
+    "triage_email":         "Triage my inbox",
+    "send_email":           "Email Mum about Sunday",
 }
 
 _SOURCE_ORDER = ("Built-in", "Action", "Plugin")
