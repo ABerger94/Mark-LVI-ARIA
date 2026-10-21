@@ -81,6 +81,7 @@ from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import routines as routines_core
+from core                      import scheduler as scheduler_core
 from core.selfedit             import SelfEditWatcher
 from types                     import SimpleNamespace
 from core                      import audio_devices
@@ -2343,6 +2344,43 @@ class JarvisLive:
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
 
+    # ── In-app scheduler ─────────────────────────────────────────
+
+    def _scheduler_say(self, text: str) -> bool:
+        """Delivery hook for core/scheduler: announce an exact line
+        (a timer finishing, a reminder, a watch alert). Returns False
+        when there is no session to speak into, so the scheduler
+        keeps the task due and retries on a later tick rather than
+        consuming it silently."""
+        if not self.session:
+            return False
+        self.plugin_say(
+            "Announce this to the user now, in one short sentence, "
+            "in their own language: " + text)
+        return True
+
+    def _scheduler_run(self, prompt: str) -> bool:
+        """Delivery hook for recurring tasks: the prompt arrives
+        already framed as a scheduled-task turn."""
+        if not self.session:
+            return False
+        self.plugin_say(prompt)
+        return True
+
+    async def _run_scheduler(self) -> None:
+        """Drive core/scheduler.tick on the session lifecycle — a
+        sibling of _run_proactive_mode in the same TaskGroup, riding
+        its lifecycle rather than running as a second unmanaged
+        loop. The store work itself runs off the event loop."""
+        while True:
+            await asyncio.sleep(2)
+            try:
+                logs = await asyncio.to_thread(scheduler_core.tick)
+                for line in logs:
+                    print(f"[Scheduler] {line}")
+            except Exception as e:
+                print(f"[Scheduler] ⚠️ {e}")
+
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
     async def _relay_phone_audio(self) -> None:
@@ -2544,6 +2582,15 @@ class JarvisLive:
         routines_core.bind_executor(self._execute_routine_step,
                                     self._all_tool_names)
 
+        # Scheduler (Phase F-REST): timers, recurring tasks and the
+        # background passes (screen watches, price checks) fire
+        # through the same session speech as everything else; the
+        # hooks report delivery, so a task that comes due while no
+        # session is up stays due and retries instead of being
+        # eaten. Bound here with the other shared services.
+        scheduler_core.bind(say=self._scheduler_say,
+                            run_prompt=self._scheduler_run)
+
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that
         # cannot be opened at them.
@@ -2674,6 +2721,7 @@ class JarvisLive:
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
+                    tg.create_task(self._run_scheduler())
                     tg.create_task(self._run_sleep_watch())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
