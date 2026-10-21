@@ -4707,6 +4707,7 @@ class MainWindow(QMainWindow):
         self.on_interrupt      = None   # callable: () -> None — stop JARVIS mid-speech
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
+        self.on_engine_applied = None   # callable: () -> None — engine changed in the providers panel
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
@@ -7208,6 +7209,8 @@ class MainWindow(QMainWindow):
         self._log.append_log("SYS: Engine settings saved — reconnecting.")
         if self.on_audio_device_change:
             self.on_audio_device_change()
+        if self.on_engine_applied:
+            self.on_engine_applied()
 
     # ── Memory panel ─────────────────────────────────────────────────────────
 
@@ -7466,6 +7469,14 @@ class JarvisUI:
     @on_audio_device_change.setter
     def on_audio_device_change(self, cb):
         self._win.on_audio_device_change = cb
+
+    @property
+    def on_engine_applied(self):
+        return self._win.on_engine_applied
+
+    @on_engine_applied.setter
+    def on_engine_applied(self, cb):
+        self._win.on_engine_applied = cb
 
     def show_confirm(self, title: str, detail: str) -> None:
         """Thread-safe: raise the irreversible-action gate. Called from action
