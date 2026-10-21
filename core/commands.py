@@ -63,6 +63,9 @@ EXAMPLE_PHRASES = {
     "send_email":           "Email Mum about Sunday",
     "calendar_setup":       "Set up my calendar",
     "check_calendar":       "What's on my calendar today?",
+    "github_setup":         "Set up GitHub",
+    "github_create_repo":   "Create a GitHub repo for this",
+    "github_push_file":     "Push this file to GitHub",
 }
 
 _SOURCE_ORDER = ("Built-in", "Action", "Plugin")
