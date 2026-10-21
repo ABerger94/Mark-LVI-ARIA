@@ -108,6 +108,118 @@ def test_inbox_classifier_down_degrades_to_unlabelled(monkeypatch):
     assert "Triage labels unavailable" in text
 
 
+# ── panel_data: fetch_inbox (rich) ───────────────────────────────────
+
+def _rich_entries():
+    now = datetime.now()
+    def stamp(dt):
+        return dt.strftime("%a, %d %b %Y %H:%M:00 -0400")
+    return [
+        {"uid": "4", "date": stamp(now - timedelta(hours=1)),
+         "from": "BGE <bge@example.com>", "seen": False,
+         "subject": "Your electric bill is ready"},
+        {"uid": "3", "date": stamp(now - timedelta(hours=3)),
+         "from": "Sam Reyes <sam@example.com>", "seen": True,
+         "subject": "Newsletter notes from Sam"},
+        {"uid": "2", "date": stamp(now - timedelta(days=1)),
+         "from": "Mega Store <deals@example.com>", "seen": True,
+         "subject": "SALE: half off everything"},
+        {"uid": "1", "date": stamp(now - timedelta(days=4)),
+         "from": "Mum <mum@example.com>", "seen": False,
+         "subject": "Sunday dinner?"},
+    ]
+
+
+def _stub_inbox_rich(monkeypatch, entries=None, verdict=_VERDICT,
+                     count=(2, None)):
+    entries = _rich_entries() if entries is None else entries
+    monkeypatch.setattr(gmail, "connected", lambda: True)
+    monkeypatch.setattr(gmail, "list_summaries",
+                        lambda **kw: (entries, None))
+    monkeypatch.setattr(gmail, "unread_count", lambda **kw: count)
+    monkeypatch.setattr(panel_data, "_classify",
+                        lambda system, user_text: verdict)
+    return entries
+
+
+def test_fetch_inbox_rich_blocks_and_count(monkeypatch):
+    _stub_inbox_rich(monkeypatch)
+    result = panel_data.fetch_inbox()
+    assert result["unread"] == 2
+    # the plain rendering of the same fetch rides along, unchanged
+    assert result["text"].splitlines()[0] == \
+        "4 most recent emails, newest first:"
+    html = result["html"]
+    # blocks: sender, subject, the IMPORTANT chip as a chip
+    assert "BGE &lt;bge@example.com&gt;" in html
+    assert "Your electric bill is ready" in html
+    assert "&nbsp;IMPORTANT&nbsp;" in html
+    assert "Newsletter notes from Sam" in html
+    # no flat pipe lines anywhere in the rich rendering
+    assert " | " not in html
+
+
+def test_fetch_inbox_day_groups_newest_first(monkeypatch):
+    entries = _stub_inbox_rich(monkeypatch)
+    html = panel_data.fetch_inbox()["html"]
+    older = entries[3]
+    moment = panel_data._entry_moment(older)
+    older_label = panel_data._day_label(moment.date(),
+                                        datetime.now().date())
+    assert html.index("Today") < html.index("Yesterday") \
+        < html.index(older_label)
+    # within Today, the newer message's block comes first
+    assert html.index("electric bill") < html.index("Newsletter notes")
+
+
+def test_fetch_inbox_unread_distinction_follows_seen_flag(monkeypatch):
+    _stub_inbox_rich(monkeypatch)
+    html = panel_data.fetch_inbox()["html"]
+    # exactly the two seen=False entries get the unread dot
+    assert html.count("●") == 2
+    # and an unread subject is bolded; a read one is not
+    i = html.index("Your electric bill is ready")
+    assert "<b>" in html[max(0, i - 80):i]
+    j = html.index("Newsletter notes from Sam")
+    assert "<b>" not in html[max(0, j - 80):j]
+
+
+def test_fetch_inbox_escapes_markup_in_mail_text(monkeypatch):
+    evil = [{"uid": "9", "date": "Wed, 21 Oct 2026 09:41:00 -0400",
+             "from": "Evil <script@x.example>", "seen": False,
+             "subject": "<b>fake</b> & <script>alert(1)</script>"}]
+    _stub_inbox_rich(monkeypatch, entries=evil, verdict="",
+                     count=(1, None))
+    html = panel_data.fetch_inbox()["html"]
+    assert "&lt;b&gt;fake&lt;/b&gt;" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>" not in html
+    assert "<b>fake</b>" not in html
+
+
+def test_fetch_inbox_unconfigured_is_a_quiet_block(monkeypatch):
+    monkeypatch.setattr(gmail, "connected", lambda: False)
+    result = panel_data.fetch_inbox()
+    assert result["unread"] is None          # never an invented zero
+    assert "Gmail isn't connected yet" in result["html"]
+    assert "set up Gmail" in result["html"]
+    assert result["text"].startswith("Gmail isn't connected yet")
+
+
+def test_fetch_inbox_count_failure_degrades_to_unknown(monkeypatch):
+    _stub_inbox_rich(monkeypatch, count=(None, "status=failed x"))
+    result = panel_data.fetch_inbox()
+    assert result["unread"] is None
+    assert "electric bill" in result["html"]   # the list still renders
+
+
+def test_fetch_inbox_empty_still_counts(monkeypatch):
+    _stub_inbox_rich(monkeypatch, entries=[], count=(0, None))
+    result = panel_data.fetch_inbox()
+    assert result["unread"] == 0
+    assert "Inbox is empty" in result["html"]
+
+
 # ── panel_data: calendar ─────────────────────────────────────────────
 
 def _ics():
