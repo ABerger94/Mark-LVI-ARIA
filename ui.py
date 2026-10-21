@@ -2599,6 +2599,161 @@ class MemoryOverlay(_HudOverlay):
         QTimer.singleShot(0, self._rebuild)
 
 
+class CommandsOverlay(_HudOverlay):
+    """Everything ARIA can be asked to do — the Commands screen.
+
+    The rows arrive with the panel: main.py builds them from the live tool
+    registries (core/commands.py) at the moment this opens, so the list is
+    the assistant as she is configured right now. A tool that failed to
+    load is not here; a plugin enabled a minute ago is. The static guide
+    this replaces did the opposite — it described tools she no longer had
+    and hid ones she had gained, and there was no moment at which anyone
+    noticed.
+    """
+
+    _OW = 560
+
+    def __init__(self, commands, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            CommandsOverlay {{
+                background: rgba(0, 6, 10, 246);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+        self.setFixedWidth(self._OW)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(6)
+
+        hdr = QLabel("⌘  COMMANDS")
+        hdr.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        lay.addWidget(hdr)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        lay.addWidget(sep)
+
+        cap = QLabel(f"{len(commands)} things ARIA can do. This list is "
+                     f"generated from the tools she actually has — it "
+                     f"cannot drift. Type to filter.")
+        cap.setWordWrap(True)
+        cap.setFont(QFont("Courier New", 7))
+        cap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(cap)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Filter commands…")
+        self._search.setFont(QFont("Courier New", 9))
+        self._search.setStyleSheet(f"""
+            QLineEdit {{ background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px;
+                padding: 6px 8px; }}
+            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+        """)
+        self._search.textChanged.connect(self._apply_filter)
+        lay.addWidget(self._search)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(400)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: 1px solid {C.BORDER}; border-radius: 3px; "
+            f"background: transparent; }}"
+        )
+        inner = QWidget()
+        rows_lay = QVBoxLayout(inner)
+        rows_lay.setContentsMargins(8, 8, 8, 8)
+        rows_lay.setSpacing(9)
+
+        self._rows = []
+        for cmd in commands:
+            holder, haystack = self._row(cmd)
+            rows_lay.addWidget(holder)
+            self._rows.append((holder, haystack))
+        if not commands:
+            none = QLabel("No tools are available in this session.")
+            none.setFont(QFont("Courier New", 9))
+            none.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            rows_lay.addWidget(none)
+        rows_lay.addStretch()
+        scroll.setWidget(inner)
+        lay.addWidget(scroll)
+
+        self._empty = QLabel("Nothing matches that filter.")
+        self._empty.setFont(QFont("Courier New", 8))
+        self._empty.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        self._empty.hide()
+        lay.addWidget(self._empty)
+
+        close = QPushButton("CLOSE")
+        close.setFixedHeight(30)
+        close.setFont(QFont("Courier New", 9))
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px; }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        close.clicked.connect(self.hide)
+        lay.addWidget(close)
+
+    @staticmethod
+    def _row(cmd):
+        """One command: its name and where it comes from, what it does, and
+        — for the tools that have one — a phrase to say it with."""
+        holder = QWidget()
+        v = QVBoxLayout(holder)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(1)
+
+        top = QHBoxLayout(); top.setSpacing(6)
+        name = QLabel(cmd["name"])
+        name.setTextFormat(Qt.TextFormat.PlainText)
+        name.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        name.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        top.addWidget(name)
+        top.addStretch()
+        src = QLabel(cmd["source"].upper())
+        src.setFont(QFont("Courier New", 7))
+        src.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        top.addWidget(src)
+        v.addLayout(top)
+
+        if cmd["description"]:
+            desc = QLabel(cmd["description"])
+            desc.setTextFormat(Qt.TextFormat.PlainText)
+            desc.setWordWrap(True)
+            desc.setFont(QFont("Courier New", 8))
+            desc.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            v.addWidget(desc)
+
+        if cmd["example"]:
+            ex = QLabel(f"Try: “{cmd['example']}”")
+            ex.setTextFormat(Qt.TextFormat.PlainText)
+            ex.setWordWrap(True)
+            ex.setFont(QFont("Courier New", 8))
+            ex.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+            v.addWidget(ex)
+
+        haystack = " ".join((cmd["name"], cmd["description"],
+                             cmd["example"], cmd["source"])).lower()
+        return holder, haystack
+
+    def _apply_filter(self, text):
+        needle = text.strip().lower()
+        visible = 0
+        for holder, haystack in self._rows:
+            show = not needle or needle in haystack
+            holder.setVisible(show)
+            visible += show
+        self._empty.setVisible(visible == 0)
+
+
 class _ScrollSafeCombo(QComboBox):
     """A dropdown that does not change when you scroll past it.
 
@@ -4285,6 +4440,7 @@ class MainWindow(QMainWindow):
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
+        self.get_commands      = None   # callable: () -> list[dict], set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
@@ -5542,6 +5698,14 @@ class MainWindow(QMainWindow):
         mem_btn.clicked.connect(self._open_memory_panel)
         lay.addWidget(mem_btn)
 
+        cmd_btn = QPushButton("⌘  COMMANDS")
+        cmd_btn.setFixedHeight(26)
+        cmd_btn.setFont(QFont("Courier New", 7))
+        cmd_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cmd_btn.setStyleSheet(_BTN_STYLE_DIM)
+        cmd_btn.clicked.connect(self._open_commands)
+        lay.addWidget(cmd_btn)
+
         plugin_btn = QPushButton("🧩  PLUGINS")
         plugin_btn.setFixedHeight(26)
         plugin_btn.setFont(QFont("Courier New", 7))
@@ -6758,6 +6922,14 @@ class MainWindow(QMainWindow):
         self._centre_overlay(ov)
         self._memory_overlay = ov
 
+    # ── Commands panel ───────────────────────────────────────────────────
+
+    def _open_commands(self):
+        rows = self.get_commands() if self.get_commands else []
+        ov = CommandsOverlay(rows, parent=self.centralWidget())
+        self._centre_overlay(ov)
+        self._commands_overlay = ov
+
     # ── Irreversible-action confirmation ─────────────────────────────────────
 
     def _show_confirm_banner(self, title: str, detail: str):
@@ -7028,6 +7200,14 @@ class JarvisUI:
     @get_plugin_settings.setter
     def get_plugin_settings(self, cb):
         self._win.get_plugin_settings = cb
+
+    @property
+    def get_commands(self):
+        return self._win.get_commands
+
+    @get_commands.setter
+    def get_commands(self, cb):
+        self._win.get_commands = cb
 
     @property
     def on_wake_toggle(self):

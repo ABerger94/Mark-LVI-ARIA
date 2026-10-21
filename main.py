@@ -687,6 +687,7 @@ class JarvisLive:
         )
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
+        self.ui.get_commands = self._commands_for_ui  # Commands screen rows
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
 
         # ── Wake word ────────────────────────────────────────────────────────
@@ -711,6 +712,18 @@ class JarvisLive:
         self.ui.on_wake_toggle   = self._ui_wake_toggle   # (enable: bool) -> str
         self.ui.on_wake_manual   = self._ui_wake_manual   # () -> toggle awake/asleep
         self.ui.on_wake_install  = self._ui_wake_install  # () -> (ok, msg)
+
+    def _commands_for_ui(self) -> list[dict]:
+        """Rows for the Commands screen, built fresh from the three live
+        registries every time the panel opens (core/commands.py) — so the
+        screen describes the assistant as she is configured now, not as
+        she was when a guide was last edited."""
+        from core.commands import build_command_list
+        return build_command_list(
+            TOOL_DECLARATIONS,
+            self._action_registry.get_tool_declarations(),
+            self._plugin_registry.get_tool_declarations(),
+        )
 
     # ── Wake word: state machine ─────────────────────────────────────────────
 
