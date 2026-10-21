@@ -1078,6 +1078,13 @@ class JarvisLive:
 
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
+        # Tool exceptions never become outcomes, so core/outcome.py's record
+        # never sees them — this is the one place they can be written down.
+        try:
+            from core import incidents
+            incidents.record(f"tool:{tool_name}", "exception", str(error))
+        except Exception:
+            pass
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"Sir, {tool_name} encountered an error. {short}")
 

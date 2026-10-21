@@ -106,6 +106,23 @@ def done(action: str, /, **facts: Any) -> str:
     return _line(DONE, action, facts)
 
 
+def _record(status: str, action: str, rendered: str) -> None:
+    """Write the durable incident record for a problem outcome.
+
+    Lazy and guarded, twice over: the import stays inside the call so this
+    module never depends on core.incidents at import time, and any failure
+    of the record itself is swallowed — this module's founding rule is that
+    the error path must not crash, and a log that can take the assistant
+    down while reporting a failure would break it in the worst place.
+    core.incidents.record_outcome applies the same rule on its side.
+    """
+    try:
+        from core import incidents
+        incidents.record_outcome(status, action, rendered)
+    except Exception:
+        pass
+
+
 def unverified(action: str, reason: str, /, **facts: Any) -> str:
     """It was requested; the result could not be confirmed.
 
@@ -113,10 +130,12 @@ def unverified(action: str, reason: str, /, **facts: Any) -> str:
     "status=unverified" reliably rounds it off to "Done!" — this was watched
     happening, which is why the sentence spells out what may not be said.
     """
-    return _line(UNVERIFIED, action, {**facts, "reason": reason}) + (
+    out = _line(UNVERIFIED, action, {**facts, "reason": reason}) + (
         " -- NOT confirmed. Tell the user plainly that you asked and cannot "
         "confirm it worked, and say what they can check. Do NOT say it is done."
     )
+    _record(UNVERIFIED, action, out)
+    return out
 
 
 def failed(action: str, reason: str, /, **facts: Any) -> str:
@@ -126,10 +145,12 @@ def failed(action: str, reason: str, /, **facts: Any) -> str:
     person can act on — "no running application matches that name" rather than
     "returncode 1".
     """
-    return _line(FAILED, action, {**facts, "reason": reason}) + (
+    out = _line(FAILED, action, {**facts, "reason": reason}) + (
         " -- This did NOT happen. Tell the user so in their own language, with "
         "the reason. Do not claim any part of it succeeded."
     )
+    _record(FAILED, action, out)
+    return out
 
 
 def started(action: str, /, **facts: Any) -> str:
