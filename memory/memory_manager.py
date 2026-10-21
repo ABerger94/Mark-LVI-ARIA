@@ -296,12 +296,22 @@ def save_memory(memory: dict) -> None:
 
 
 def _truncate_value(val: str) -> str:
+    return _truncate_value_flagged(val)[0]
+
+
+def _truncate_value_flagged(val) -> tuple[str, bool]:
+    """_truncate_value, plus whether it cut. The cap stays — it is the
+    prompt budget, not an oversight — but the cut stops being silent:
+    the stored entry is marked (see _recursive_update) and save results
+    can say it happened. A memory that quietly shortens what it was
+    told teaches the assistant to misquote the user with confidence."""
     if isinstance(val, str) and len(val) > MAX_VALUE_LENGTH:
-        return val[:MAX_VALUE_LENGTH].rstrip() + "…"
-    return val
+        return val[:MAX_VALUE_LENGTH].rstrip() + "…", True
+    return val, False
 
 
-def _recursive_update(target: dict, updates: dict) -> bool:
+def _recursive_update(target: dict, updates: dict,
+                      truncated_out: list | None = None) -> bool:
     changed = False
     for key, value in updates.items():
         if value is None:
@@ -312,11 +322,17 @@ def _recursive_update(target: dict, updates: dict) -> bool:
             if key not in target or not isinstance(target[key], dict):
                 target[key] = {}
                 changed = True
-            if _recursive_update(target[key], value):
+            if _recursive_update(target[key], value, truncated_out):
                 changed = True
         else:
-            new_val  = _truncate_value(str(value["value"] if isinstance(value, dict) else value))
-            entry    = {"value": new_val, "updated": datetime.now().strftime("%Y-%m-%d")}
+            new_val, was_cut = _truncate_value_flagged(
+                str(value["value"] if isinstance(value, dict) else value))
+            entry = {"value": new_val,
+                     "updated": datetime.now().strftime("%Y-%m-%d")}
+            if was_cut:
+                entry["truncated"] = True
+                if truncated_out is not None:
+                    truncated_out.append(key)
             existing = target.get(key, {})
             if not isinstance(existing, dict) or existing.get("value") != new_val:
                 target[key] = entry
@@ -324,13 +340,18 @@ def _recursive_update(target: dict, updates: dict) -> bool:
     return changed
 
 
-def update_memory(memory_update: dict) -> dict:
+def update_memory(memory_update: dict,
+                  truncated_out: list | None = None) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
         return load_memory()
     memory = load_memory()
-    if _recursive_update(memory, memory_update):
+    cut: list[str] = []
+    if _recursive_update(memory, memory_update, cut):
         save_memory(memory)
-        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
+        note = f" (shortened to fit: {', '.join(cut)})" if cut else ""
+        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}{note}")
+    if truncated_out is not None:
+        truncated_out.extend(cut)
     return memory
 
 def _entry_value(entry) -> str:
@@ -573,8 +594,13 @@ def remember(key: str, value: str, category: str = "notes") -> str:
     valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes", "playlist"}
     if category not in valid:
         category = "notes"
-    update_memory({category: {key: {"value": value}}})
-    return f"Remembered: {category}/{key} = {value}"
+    cut: list[str] = []
+    update_memory({category: {key: {"value": value}}}, cut)
+    msg = f"Remembered: {category}/{key} = {value}"
+    if key in cut:
+        msg += (f" — shortened to {MAX_VALUE_LENGTH} characters to fit "
+                f"the memory limit; the stored entry is marked as cut")
+    return msg
 
 
 def forget(key: str, category: str = "notes") -> str:
