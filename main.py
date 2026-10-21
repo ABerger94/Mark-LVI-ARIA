@@ -2546,6 +2546,15 @@ class JarvisLive:
         scheduler_core.bind(say=self._scheduler_say,
                             run_prompt=self._scheduler_run)
 
+        # Content panel tabs (UI TABS): the Inbox and Calendar tabs
+        # pull from the same Gmail / iCal sources the tools speak
+        # from, composed by core/panel_data off the Qt thread — the
+        # tab and the spoken answer can never disagree.
+        from core import panel_data as _panel_data
+        self.ui.set_content_tab_providers(
+            inbox_fetcher=_panel_data.fetch_inbox_text,
+            calendar_fetcher=_panel_data.fetch_calendar_text)
+
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that
         # cannot be opened at them.
