@@ -423,6 +423,34 @@ def forget(key: str, category: str = "notes") -> str:
 forget_memory = forget
 
 
+def forget_by_keyword(query: str) -> tuple[int, list[str]]:
+    """Delete every stored fact whose key or value contains `query`
+    (case-insensitive) — the tool face of forgetting, mirroring ARIA's
+    memory_forget_entries. The exact-key forget() above is the UI's
+    per-entry button; this is the spoken form ("forget my old
+    playlist"), so it matches the way a person names a memory, not
+    the way the store keys it. Returns (count, ["category/key", ...])
+    so the caller can say exactly what went. An empty query forgets
+    nothing: a keyword-less delete-everything is not something a
+    misheard word should be able to do."""
+    q = (query or "").strip().lower()
+    if not q:
+        return 0, []
+    memory = load_memory()
+    gone: list[str] = []
+    for cat, items in memory.items():
+        if not isinstance(items, dict):
+            continue                     # 'sessions' is a list, not facts
+        for key in list(items.keys()):
+            val = _entry_value(items[key])
+            if q in key.lower() or q in val.lower():
+                del items[key]
+                gone.append(f"{cat}/{key}")
+    if gone:
+        save_memory(memory)
+    return len(gone), gone
+
+
 # ── Session memory ─────────────────────────────────────────────────────────────
 
 _SESSION_MAX = 3   # safety cap — in practice 0-1 entries after pop

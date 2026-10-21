@@ -53,7 +53,7 @@ from ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
-    search_memory, set_trim_notifier,
+    search_memory, set_trim_notifier, forget_by_keyword,
 )
 
 # The file-backed tools (open_app, web_search, browser_control, …) are no longer
@@ -506,6 +506,31 @@ TOOL_DECLARATIONS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "forget_memory",
+        "description": (
+            "Forget stored facts about the user whose key or value contains "
+            "a keyword. Call this when the user says 'forget X', 'forget "
+            "about my ...', or asks you to delete something you remember. "
+            "This permanently deletes EVERY matching entry from long-term "
+            "memory — one keyword can match several facts — and the result "
+            "names exactly what was removed, so report it accurately. "
+            "A query that matches nothing changes nothing."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {
+                    "type": "STRING",
+                    "description": (
+                        "Keyword to forget — a name, a topic, or a word "
+                        "from the fact (e.g. 'playlist', 'old address')."
+                    ),
+                },
+            },
+            "required": ["query"],
         },
     },
     {
@@ -1398,6 +1423,25 @@ class JarvisLive:
                 # hundred short strings, and a thread hop would cost more than
                 # the work itself.
                 result = search_memory(args.get("query", ""), limit=8)
+
+            elif name == "forget_memory":
+                # Keyword delete over the same store recall reads — ARIA's
+                # forget semantics (memory_forget_entries): key or value
+                # contains the query, case-insensitive. Same local-scan
+                # reasoning as recall above. The names of what went are the
+                # answer; a no-match is a clean report, never an error.
+                _q = (args.get("query") or "").strip()
+                if not _q:
+                    result = "Nothing to forget: empty query."
+                else:
+                    _n, _gone = forget_by_keyword(_q)
+                    if _n:
+                        result = (f"Forgot {_n} "
+                                  f"{'memory' if _n == 1 else 'memories'} "
+                                  f"matching '{_q}': {', '.join(_gone)}.")
+                    else:
+                        result = (f"Nothing stored matches '{_q}' — "
+                                  f"nothing was forgotten.")
 
             elif name == "undo":
                 if str(args.get("action", "")).lower().strip() == "list":

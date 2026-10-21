@@ -25,6 +25,7 @@ EXAMPLE_PHRASES = {
     "close_camera":      "Close the camera",
     "manage_monitor":    "Keep an eye on graphics card prices",
     "recall_memory":     "What do you remember about me?",
+    "forget_memory":     "Forget my old playlist",
     "undo":              "Undo that last change",
     "shutdown_jarvis":   "That's all — shut down",
     "open_app":          "Open Spotify",
