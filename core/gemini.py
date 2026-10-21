@@ -292,6 +292,16 @@ def live_model() -> str:
     return LIVE_MODELS[0]
 
 
+def all_live_resting() -> bool:
+    """True when every rung of the Live ladder is resting — out of quota,
+    gone for this key, or set aside. The ladder has nowhere left to step
+    to: live_model() will hand back the top rung anyway, and it will fail
+    the same way. This is the state the engine failover keys on (see
+    JarvisLive._maybe_failover in main.py); a single resting rung is
+    just the ladder working."""
+    return all(_cooling(m) for m in LIVE_MODELS)
+
+
 def note_live_failure(model: str, err: str) -> bool:
     """Record why a Live model failed. True when it is worth trying the next.
 
