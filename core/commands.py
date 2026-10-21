@@ -66,6 +66,7 @@ EXAMPLE_PHRASES = {
     "github_setup":         "Set up GitHub",
     "github_create_repo":   "Create a GitHub repo for this",
     "github_push_file":     "Push this file to GitHub",
+    "provider_setup":       "Wire my Groq key in",
 }
 
 _SOURCE_ORDER = ("Built-in", "Action", "Plugin")

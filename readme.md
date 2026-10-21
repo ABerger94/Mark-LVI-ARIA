@@ -131,6 +131,15 @@ It's not just an assistant — it's an extension of your digital life.
 
 Each part has a **TEST** button that connects, measures and reports in a sentence — *"Answered in 0.36s"*, *"Nothing answered at that address — is the server running?"*, *"No model called 'qwen3:9b' at that address."* Setting this up without one means guessing which of four things is wrong.
 
+**Coming from ARIA? Your keys already fit.** The hosted services ARIA's
+provider chain used are catalog entries here — **Groq**, **OpenRouter**,
+**Mistral**, and **Ollama Cloud** (added for her: `https://ollama.com/v1`) —
+and a key for any of them can be saved by voice with `provider_setup`
+("wire my Groq key…"), which stores it as the OpenAI-compatible provider's
+creds (`base_url` from the service's preset, `api_key`, `catalog`, and
+`model` when named) and names that provider as the pipeline's LLM. Gemini
+needs nothing — it has its own key field, as before.
+
 **The form is generated.** Every field comes from the provider's own declaration, so adding a provider is one file in `providers/` and the interface does not change — the same promise the plugin system makes about skills.
 
 #### 🧠 Side calls can leave Gemini without the voice leaving it

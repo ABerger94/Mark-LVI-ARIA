@@ -47,6 +47,7 @@ from .base import DEFAULT_CAPS, Field, FunctionCall
 # on the developer's machine.
 PRESETS: dict[str, str] = {
     "Ollama":               "http://127.0.0.1:11434/v1",
+    "Ollama Cloud":         "https://ollama.com/v1",
     "LM Studio":            "http://127.0.0.1:1234/v1",
     "llama.cpp server":     "http://127.0.0.1:8080/v1",
     "vLLM":                 "http://127.0.0.1:8000/v1",
@@ -115,6 +116,9 @@ CATALOG = (
     {"id": "jan",        "label": "Jan",
      "note": "on this computer · free", "local": True,
      "values": {"base_url": PRESETS["Jan"], **_LOCAL_BUDGET}},
+    {"id": "ollama_cloud", "label": "Ollama Cloud",
+     "note": "cloud · Ollama's hosted models · needs a key", "local": False,
+     "values": {"base_url": PRESETS["Ollama Cloud"]}},
     {"id": "groq",       "label": "Groq",
      "note": "cloud · very fast · free tier", "local": False,
      "values": {"base_url": PRESETS["Groq"]}},
