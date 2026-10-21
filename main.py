@@ -80,6 +80,7 @@ from core                     import gemini as _gemini
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
+from core.selfedit             import SelfEditWatcher
 from core                      import audio_devices
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
@@ -600,6 +601,18 @@ class JarvisLive:
         # Set only when a local pipeline is running, so push-to-talk can tell it
         # the turn is over. Live decides that on the server; nothing does here.
         self._engine               = None
+        # Self-edit watcher (Phase D — ARIA's P4 loop, core/selfedit.py).
+        # It snapshots her own source tree NOW, at boot; after every
+        # completed turn the receive loop asks it to check (see
+        # _maybe_check_self_edit). Announcing goes through speak(), the
+        # restart through _restart_after_self_edit — announced in her
+        # voice, never confirm-gated, exactly as ARIA's self-restart was.
+        self._selfedit_busy        = False
+        self._selfedit             = SelfEditWatcher(
+            announce=self.speak,
+            restart=self._restart_after_self_edit,
+            speech_idle=lambda: not self._is_speaking,
+        )
         # Deadline for "we sent a turn and the server has said nothing since".
         # None means nothing is outstanding. Armed by the send sites, cleared by
         # the first frame of ANY response, watched by _watch_stall().
@@ -1100,6 +1113,59 @@ class JarvisLive:
             pass
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"{tool_name} encountered an error. {short}")
+
+    def _maybe_check_self_edit(self):
+        """Post-turn self-edit check, called from the receive loop's
+        turn_complete handling — the ONE completion path both engines
+        share: providers/base.py's contract is that a pipeline turn ends
+        with the same server_content.turn_complete a Live turn does, so
+        this covers Gemini Live and the local pipeline alike. The check
+        itself (hashing the tree, compiling, a subprocess smoke import)
+        runs on a worker thread — the receive loop must never wait for
+        it, and while speech is playing out the restart it may arm
+        waits for the speaking to finish on the watcher's own timer."""
+        if self._selfedit_busy:
+            return
+        self._selfedit_busy = True
+
+        async def _run():
+            try:
+                await asyncio.to_thread(self._selfedit.check)
+            except Exception:
+                pass
+            finally:
+                self._selfedit_busy = False
+
+        asyncio.create_task(_run())
+
+    def _restart_after_self_edit(self):
+        """Relaunch this process on the watcher's word. Mirrors the
+        shutdown path's lifecycle — save the session summary first —
+        then ARIA's relaunch: same interpreter, same script, same
+        arguments, then exit so the new process owns the machine.
+        Called from the watcher's timer thread."""
+        import os as _os
+        import subprocess as _sp
+        script = _os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+        if not script or not _os.path.isfile(script):
+            print("[SelfEdit] restart skipped — no script to relaunch")
+            return
+
+        async def _do_restart():
+            try:
+                await self._save_session_summary()
+            except Exception:
+                pass
+            print("[SelfEdit] relaunching with updated code…")
+            try:
+                _sp.Popen([sys.executable, script] + sys.argv[1:])
+            except Exception as e:
+                print(f"[SelfEdit] relaunch failed: {e}")
+                return
+            _os._exit(0)
+
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(_do_restart(), self._loop)
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
@@ -1767,6 +1833,12 @@ class JarvisLive:
                                     await asyncio.sleep(2.0)
                                     self.ui.stop_camera_stream()
                                 asyncio.create_task(_cam_close())
+
+                            # Self-edit watcher (Phase D): a turn that
+                            # changed her own code ends here — validate
+                            # it, announce it, restart or restore. See
+                            # core/selfedit.py.
+                            self._maybe_check_self_edit()
 
                     if response.tool_call:
                         fn_responses = []

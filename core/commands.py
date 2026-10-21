@@ -44,6 +44,8 @@ EXAMPLE_PHRASES = {
     "dev_agent":         "Build me a to-do list app",
     "video_player":      "Play a video of the ocean",
     "spotify":           "What's playing on Spotify?",
+    "edit_own_code":     "Rewrite your startup greeting",
+    "patch_own_code":    "Fix that bug in your own code",
 }
 
 _SOURCE_ORDER = ("Built-in", "Action", "Plugin")
