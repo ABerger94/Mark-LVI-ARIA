@@ -407,6 +407,25 @@ def save_brief_enabled(enabled: bool) -> None:
     write_config(data)
 
 
+# ── Engine failover ─────────────────────────────────────────────────────────
+# When Gemini Live becomes unrecoverable by its own ladder (every rung
+# resting, or the session failing faster than reconnects can absorb),
+# the conversation fails over to the configured pipeline engine for the
+# rest of the run — see JarvisLive._maybe_failover in main.py. On unless
+# explicitly switched off: anything but an explicit false means on (the
+# dashboard_https idiom). The flag alone never fails anything over — a
+# configured, complete pipeline provider is also required.
+
+def get_engine_auto_failover() -> bool:
+    return bool(load_api_keys().get("engine_auto_failover", True))
+
+
+def save_engine_auto_failover(enabled: bool) -> None:
+    data = load_api_keys()
+    data["engine_auto_failover"] = bool(enabled)
+    write_config(data)
+
+
 # ── Audio devices ────────────────────────────────────────────────────────────
 # Stored as device NAMES, not sounddevice indices. Indices shift every time a
 # USB device is plugged in or removed, so a saved index silently starts pointing
