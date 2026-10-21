@@ -1,7 +1,9 @@
 import json
+import os
 import re
+import shutil
 from datetime import datetime
-from threading import Lock
+from threading import RLock
 from pathlib import Path
 import sys
 
@@ -14,8 +16,18 @@ def get_base_dir() -> Path:
 
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
-_lock            = Lock()
+_lock            = RLock()
 MAX_VALUE_LENGTH = 380
+BACKUP_KEEP      = 5
+
+# The categories that hold FACTS about the person. Two other things live
+# in the same file and are not facts: 'sessions' (a list of visit
+# summaries) and 'playlist' (DJ's shelf of Spotify URIs). Facts are what
+# semantic recall embeds and what the store/prompt budgets ration; the
+# machinery categories are never embedded, and their entries are never
+# trimmed to make room for facts.
+FACT_CATEGORIES = ("identity", "preferences", "projects",
+                   "relationships", "wishes", "notes")
 
 # ── Why there are two very different numbers here ────────────────────────────
 #
@@ -54,22 +66,166 @@ def _empty_memory() -> dict:
         "notes":         {},
     }
 
+def _parse_store(text: str) -> dict | None:
+    """Parse store text; the dict, or None when the text is not a usable
+    store (bad JSON, or JSON that isn't an object)."""
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _with_defaults(data: dict) -> dict:
+    base = _empty_memory()
+    for key in base:
+        if key not in data:
+            data[key] = {}
+    return data
+
+
+def _backup_slots() -> list[Path]:
+    """Backup file paths, newest first (slot 1 is the most recent)."""
+    d = MEMORY_PATH.parent / "backups"
+    return [d / f"long_term.{i}.json" for i in range(1, BACKUP_KEEP + 1)]
+
+
+def _snapshot_backup() -> None:
+    """Copy the CURRENT live store into the backup rotation — but only
+    if it still parses. A backup of a corrupt file is worse than no
+    backup: it would occupy a slot the recovery walk trusts. Never
+    raises; a failed backup costs a snapshot, not a save."""
+    try:
+        if not MEMORY_PATH.exists():
+            return
+        if _parse_store(MEMORY_PATH.read_text(encoding="utf-8")) is None:
+            return
+        slots = _backup_slots()
+        slots[0].parent.mkdir(parents=True, exist_ok=True)
+        for i in range(len(slots) - 1, 0, -1):
+            if slots[i - 1].exists():
+                os.replace(slots[i - 1], slots[i])
+        shutil.copyfile(MEMORY_PATH, slots[0])
+    except Exception as e:
+        print(f"[Memory] ⚠️ Backup failed: {e}")
+
+
+def _write_store(memory: dict) -> None:
+    """The one way the store reaches disk. Two properties, both earned:
+
+      * ATOMIC — serialised to a temp file in the same directory and
+        os.replace()d over the live file, so a crash mid-write (or a
+        full disk, or a kill) leaves the PREVIOUS valid store in
+        place, never a torn half-file. The old code wrote the live
+        file in place; a torn write there was indistinguishable from
+        amnesia at the next load.
+      * BACKED UP — before the replace, the outgoing live file is
+        snapshotted into memory/backups/ (the last BACKUP_KEEP
+        known-good copies), which is what load-time recovery walks.
+    """
+    text = json.dumps(memory, indent=2, ensure_ascii=False)
+    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        _snapshot_backup()
+        tmp = MEMORY_PATH.with_name(MEMORY_PATH.name + ".tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, MEMORY_PATH)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+
+
+# Set when a load had to recover (or give up), cleared when the startup
+# briefing speaks it once — see pop_recovery_note().
+_recovery_note: str | None = None
+
+
+def pop_recovery_note() -> str | None:
+    """The one-line note from the most recent load-time recovery, or
+    None when recent loads were clean. Consumed by reading: a recovery
+    is announced once, in the startup briefing, not repeated on every
+    load — the incident record is the durable copy."""
+    global _recovery_note
+    note, _recovery_note = _recovery_note, None
+    return note
+
+
 def load_memory() -> dict:
     if not MEMORY_PATH.exists():
+        # A missing file is a fresh start, not damage: no store has
+        # ever been written here. (Backups are only consulted when a
+        # store EXISTS but cannot be read — see _recover_from_backups.)
         return _empty_memory()
     with _lock:
+        data = None
         try:
-            data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                base = _empty_memory()
-                for key in base:
-                    if key not in data:
-                        data[key] = {}
-                return data
-            return _empty_memory()
+            data = _parse_store(MEMORY_PATH.read_text(encoding="utf-8"))
         except Exception as e:
             print(f"[Memory] ⚠️ Load error: {e}")
-            return _empty_memory()
+        if data is not None:
+            return _with_defaults(data)
+        return _recover_from_backups()
+
+
+def _recover_from_backups() -> dict:
+    """The live store exists but cannot be read. Walk the backups
+    newest → oldest; the first that parses becomes the store again.
+
+    This replaces the old behaviour — print one line, return an empty
+    memory — under which a single torn write silently cost the user
+    every fact they had ever told the assistant, with no record
+    anywhere that it had happened. Recovery (and total loss) are both
+    recorded as incidents, and both leave a note for the startup
+    briefing: the user hears about it from the assistant, once, in
+    plain words — they do not find out by being forgotten."""
+    global _recovery_note
+    from core import incidents
+    slots = [s for s in _backup_slots() if s.exists()]
+    for depth, slot in enumerate(slots, start=1):
+        try:
+            data = _parse_store(slot.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+        if data is None:
+            continue
+        restored = _with_defaults(data)
+        try:
+            _write_store(restored)
+        except Exception as e:
+            print(f"[Memory] ⚠️ Restore write failed: {e}")
+        msg = (f"long_term.json unreadable; restored from backup "
+               f"{depth} of {len(slots)} ({slot.name})")
+        print(f"[Memory] 🛟 Recovered: {msg}")
+        incidents.record("memory", "memory_recovered", msg)
+        _recovery_note = (
+            "A note about my memory: its file was damaged, so I "
+            "restored it from a backup — anything saved very recently "
+            "may be missing.")
+        return restored
+    print("[Memory] 🛟 No readable backup — starting with an empty memory")
+    incidents.record("memory", "memory_lost",
+                     "long_term.json unreadable and no backup parsed; "
+                     "memory started empty")
+    _recovery_note = (
+        "A note about my memory: its file was damaged and no backup "
+        "could be read, so I have started with an empty memory — I "
+        "may be missing things you told me before.")
+    # Heal the file: move the unreadable store aside (kept, not
+    # deleted — it is evidence, and a human may yet read something
+    # out of it) and write a valid empty store, so every later load
+    # does not re-walk the backups and re-record the loss.
+    try:
+        aside = MEMORY_PATH.with_name(
+            f"{MEMORY_PATH.name}.corrupt-{datetime.now():%Y%m%d%H%M%S}")
+        os.replace(MEMORY_PATH, aside)
+        _write_store(_empty_memory())
+    except Exception as e:
+        print(f"[Memory] ⚠️ Could not reset the damaged store: {e}")
+    return _empty_memory()
 
 def _all_entries(memory: dict) -> list[tuple]:
     entries = []
@@ -96,7 +252,9 @@ def set_trim_notifier(fn) -> None:
 def _trim_to_limit(memory: dict) -> dict:
     if len(json.dumps(memory, ensure_ascii=False)) <= MEMORY_MAX_CHARS:
         return memory
-    entries = _all_entries(memory)
+    # Only facts are trimmed: the cap rations the fact store, and a
+    # playlist on DJ's shelf is not kindling for it.
+    entries = [t for t in _all_entries(memory) if t[0] in FACT_CATEGORIES]
     entries.sort(key=lambda t: t[2].get("updated", "0000-00-00"))
     dropped = []
     for cat, key, _ in entries:
@@ -115,16 +273,26 @@ def _trim_to_limit(memory: dict) -> dict:
             pass
     return memory
 
+def _embeddings_module():
+    """The semantic-recall sidecar (memory/embeddings.py), imported
+    lazily and never allowed to break a save or a recall: it pulls the
+    Gemini SDK, and memory_manager is imported by nearly everything.
+    None means "no semantic leg today" — callers degrade to lexical."""
+    try:
+        from memory import embeddings
+        return embeddings
+    except Exception:
+        return None
+
+
 def save_memory(memory: dict) -> None:
     if not isinstance(memory, dict):
         return
     memory = _trim_to_limit(memory)
-    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _lock:
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    _write_store(memory)
+    emb = _embeddings_module()
+    if emb is not None:
+        emb.note_saved(memory)
 
 
 def _truncate_value(val: str) -> str:
@@ -473,12 +641,7 @@ def save_session_summary(summary: str, language: str = "") -> None:
         entry["language"] = language
     sessions.append(entry)
     memory["sessions"] = sessions[-_SESSION_MAX:]
-    with _lock:
-        MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    _write_store(memory)
     print(f"[Memory] 📝 Session saved ({entry['date']}): {summary[:60]}…")
 
 
@@ -491,16 +654,13 @@ def pop_last_session() -> dict | None:
         if not MEMORY_PATH.exists():
             return None
         try:
-            memory   = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+            memory   = load_memory()
             sessions = memory.get("sessions", [])
             if not isinstance(sessions, list) or not sessions:
                 return None
             entry = sessions.pop()          # remove the last entry
             memory["sessions"] = sessions
-            MEMORY_PATH.write_text(
-                json.dumps(memory, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            _write_store(memory)
             return entry
         except Exception as e:
             print(f"[Memory] ⚠️ pop_last_session error: {e}")

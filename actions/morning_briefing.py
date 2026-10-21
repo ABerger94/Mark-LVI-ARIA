@@ -53,7 +53,7 @@ import urllib.request
 from datetime import datetime, timedelta
 
 from core import gmail, ical, outcome
-from memory import config_manager
+from memory import config_manager, memory_manager
 
 _UA = {"User-Agent": "ARIA-Agent/8.0"}
 
@@ -242,6 +242,17 @@ def _fetch_news_block(topics, news_fetch):
     return title, "\n\n".join(blocks), section
 
 
+def _recovery_note_suffix() -> str:
+    """The memory store's recovery note (Phase G1), appended once to
+    whichever delivery speaks first. When the store had to be
+    restored from a backup — or could not be — Alek hears it here, in
+    the greeting, in plain words: not as a console line he will never
+    see, and not discovered later by being forgotten. Empty string
+    when recent loads were clean."""
+    note = memory_manager.pop_recovery_note()
+    return f" {note}" if note else ""
+
+
 # ── The one composition ─────────────────────────────────────────────────────
 
 def salutation_for(now: datetime) -> str:
@@ -268,7 +279,8 @@ def compose_briefing_text(now: datetime = None,
             + _calendar_sections(now)
             + _email_section()
             + _weather_section(city)
-            + (news_section or ""))
+            + (news_section or "")
+            + _recovery_note_suffix())
 
 
 # Per-section bounds for the startup composition, in seconds. The
@@ -339,7 +351,8 @@ async def compose_startup_briefing(now: datetime = None,
     greeting = f"{salutation_for(now)}{', ' + name if name else ''}."
     text = (f"{greeting} Today is {now.strftime('%A, %B %d')}."
             + results["calendar"] + results["email"]
-            + results["weather"] + (news_section or ""))
+            + results["weather"] + (news_section or "")
+            + _recovery_note_suffix())
     return text, panel
 
 
