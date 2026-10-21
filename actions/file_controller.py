@@ -10,6 +10,7 @@ try:
 except ImportError:
     _SEND2TRASH = False
 
+from core import confirm
 from core.undo import push_undo
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
@@ -90,20 +91,21 @@ def _restore_from_trash(original: Path) -> str:
             f"automatically, but it is there and can be restored by hand.")
 
 
-_SAFE_ROOTS: list[Path] = [
-    Path.home(),
-]
-
-def _is_safe_path(target: Path) -> bool:
-    """Is the given path inside _SAFE_ROOTS? If not, reject the operation."""
-    try:
-        resolved = target.resolve()
-        return any(
-            resolved == root.resolve() or resolved.is_relative_to(root.resolve())
-            for root in _SAFE_ROOTS
-        )
-    except Exception:
-        return False
+# ── Paths: anywhere (Phase C, blueprint P5) ─────────────────────────────
+#
+# This module used to confine every operation to _SAFE_ROOTS — the home
+# folder — and answer "Access denied" for anything outside it. Alek's
+# ruling for the migration is explicit: she can edit and access ALL
+# files on his computer. There is no root check any more; an absolute
+# path anywhere (another drive, a network share, a system folder) is
+# honoured exactly as given.
+#
+# What protects files now is the shape of the operations, not a fence:
+# writes snapshot their previous contents for undo, deletes go to the
+# Trash with an undo pushed, and `delete` itself sits behind the
+# on-screen confirmation (see _delete_gated). The one refusal that
+# stays lives in delete_file: the named user folders themselves
+# (Desktop, Documents, the home folder) cannot be deleted as a whole.
 
 def _get_desktop() -> Path:
     if _OS == "Linux":
@@ -198,8 +200,6 @@ def _safe_trash(target: Path) -> str:
 def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
     try:
         target = _resolve_path(path)
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
         if not target.exists():
             return f"Path not found: {target}"
         if not target.is_dir():
@@ -230,8 +230,6 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
         existed = target.exists()
         previous = None
@@ -252,8 +250,6 @@ def create_folder(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
         already = target.exists()
         target.mkdir(parents=True, exist_ok=True)
         # Only offer to undo a folder we actually made. "mkdir -p" on something
@@ -270,8 +266,6 @@ def delete_file(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
         if not target.exists():
             return f"Not found: {target.name}"
 
@@ -306,10 +300,6 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
-        if not _is_safe_path(src):
-            return f"Access denied (source): {src}"
-        if not _is_safe_path(dst):
-            return f"Access denied (destination): {dst}"
 
         if dst.is_dir():
             dst = dst / src.name
@@ -335,10 +325,6 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
-        if not _is_safe_path(src):
-            return f"Access denied (source): {src}"
-        if not _is_safe_path(dst):
-            return f"Access denied (destination): {dst}"
 
         if dst.is_dir():
             dst = dst / src.name
@@ -372,8 +358,6 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
     try:
         base     = _resolve_path(path)
         target   = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
         if not target.exists():
             return f"Not found: {target.name}"
         if not new_name:
@@ -397,8 +381,6 @@ def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
         if not target.exists():
             return f"File not found: {target.name}"
         if not target.is_file():
@@ -418,8 +400,6 @@ def write_file(path: str, name: str = "", content: str = "",
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
 
         # Snapshot before writing. None means "did not exist", which is a
@@ -454,8 +434,6 @@ def find_files(name: str = "", extension: str = "",
                path: str = "home", max_results: int = 20) -> str:
     try:
         search_path = _resolve_path(path)
-        if not _is_safe_path(search_path):
-            return f"Access denied: {search_path}"
         if not search_path.exists():
             return f"Search path not found: {path}"
 
@@ -494,8 +472,6 @@ def get_largest_files(path: str = "downloads", count: int = 10) -> str:
     count = min(count, 50)  # maksimum 50
     try:
         search_path = _resolve_path(path)
-        if not _is_safe_path(search_path):
-            return f"Access denied: {search_path}"
         if not search_path.exists():
             return f"Path not found: {path}"
 
@@ -625,8 +601,6 @@ def get_file_info(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
-        if not _is_safe_path(target):
-            return f"Access denied: {target}"
         if not target.exists():
             return f"Not found: {target.name}"
 
@@ -644,6 +618,30 @@ def get_file_info(path: str, name: str = "") -> str:
 
     except Exception as e:
         return f"Could not get file info: {e}"
+
+def _delete_gated(path: str, name: str = "") -> str:
+    """delete, behind the on-screen gate (blueprint D3).
+
+    The file itself goes to the Trash and an undo is pushed, so this is
+    not the most irreversible thing she does — but 'delete' is the word
+    the user hears, restoring from the Trash is best-effort outside
+    Windows, and the destructive classes were ruled to ask first. The
+    gate is core/confirm.py's, the same one restart/shutdown use: a
+    human presses CONFIRM, or it does not happen."""
+    base   = _resolve_path(path)
+    target = (base / name) if name else base
+    if confirm.pending_title():
+        return ("There is already a confirmation waiting on screen — "
+                "answer that one first. Nothing was deleted.")
+    return confirm.request(
+        key="file_delete",
+        title=f"Delete {target.name}",
+        detail=(f"{target} — it goes to the Trash / Recycle Bin and an "
+                f"undo is kept, but pulling it back is not guaranteed "
+                f"on every platform."),
+        run=lambda: delete_file(path, name=name),
+    )
+
 
 def file_controller(
     parameters: dict = None,
@@ -670,7 +668,7 @@ def file_controller(
             return create_folder(path, name=name)
 
         elif action == "delete":
-            return delete_file(path, name=name)
+            return _delete_gated(path, name=name)
 
         elif action == "move":
             return move_file(path, name=name, destination=params.get("destination", ""))

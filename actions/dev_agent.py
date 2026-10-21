@@ -17,7 +17,7 @@ API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
 PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
-from core import gemini
+from core import confirm, gemini
 
 MODEL_PLANNER    = gemini.SMART
 MODEL_WRITER     = gemini.SMART
@@ -597,13 +597,31 @@ def dev_agent(
     if not description:
         return "Please describe the project you want me to build, sir."
 
-    return _build_project(
-        description  = description,
-        language     = language,
-        project_name = project_name,
-        timeout      = timeout,
-        speak        = speak,
-        player       = player,
+    # ── The gate (blueprint D3) ──────────────────────────────────────
+    # A build here is more than file writes: dev_agent pip-installs the
+    # packages its plan chooses and then RUNS what it wrote, fixing
+    # errors and installing more as it goes. Installs are one of the
+    # classes that ask first, so the whole build sits behind the
+    # on-screen confirmation — one human yes covers the installs and
+    # the run, rather than a banner per package mid-build.
+    if confirm.pending_title():
+        return ("There is already a confirmation waiting on screen — "
+                "answer that one first. Nothing was built.")
+    return confirm.request(
+        key="dev_agent",
+        title="Build a project with dev_agent",
+        detail=("dev_agent will plan the project, write its files, "
+                "pip-install the packages it chooses, and run the "
+                "result — fixing errors and installing more packages "
+                "as it goes."),
+        run=lambda: _build_project(
+            description  = description,
+            language     = language,
+            project_name = project_name,
+            timeout      = timeout,
+            speak        = speak,
+            player       = player,
+        ),
     )
 
 

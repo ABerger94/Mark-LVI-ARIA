@@ -62,23 +62,24 @@ def _get_os() -> str:
 def _get_api_key() -> str:
     return _load_config().get("gemini_api_key", "")
 
-_SAFE_SCREENSHOT_ROOTS = (
-    Path.home(),
-)
+def _screenshot_path(requested: str | None) -> Path:
+    """Where a screenshot goes: the path that was asked for.
 
-def _safe_screenshot_path(requested: str | None) -> Path:
+    This used to confine screenshots to the home folder and silently
+    substitute a Desktop file for any path outside it — the caller was
+    told the requested path while the PNG landed somewhere else. Under
+    the full-access ruling (blueprint P5) the requested path is
+    honoured anywhere; the Desktop default remains only for when no
+    path is given, or the one given cannot be made sense of."""
     fallback = Path.home() / "Desktop" / "jarvis_screenshot.png"
     if not requested:
         return fallback
     try:
         p = Path(requested).expanduser().resolve()
-        for root in _SAFE_SCREENSHOT_ROOTS:
-            if p.is_relative_to(root.resolve()):
-                p.parent.mkdir(parents=True, exist_ok=True)
-                return p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
     except Exception:
-        pass
-    return fallback
+        return fallback
 
 def _require_pyautogui():
     """Refuse early, with the sentence that says what to install.
@@ -260,7 +261,7 @@ def _clipboard_paste(text: str) -> str:
 
 def _screenshot(save_path: str | None = None) -> str:
     _require_pyautogui()
-    path = _safe_screenshot_path(save_path)
+    path = _screenshot_path(save_path)
     img  = pyautogui.screenshot()
     img.save(str(path))
     return f"Screenshot saved: {path}"

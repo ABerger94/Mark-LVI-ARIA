@@ -11,6 +11,8 @@ from datetime import datetime
 
 from config import is_windows, is_mac, is_linux
 
+from core import confirm, outcome
+
 _CNW: dict = (
     {"creationflags": subprocess.CREATE_NO_WINDOW}
     if platform.system() == "Windows" else {}
@@ -935,6 +937,49 @@ def _get_schedule_status() -> str:
 
 
 def game_updater(parameters: dict, player=None, speak=None) -> str:
+    """The tool entry, with the D3 gate in front of the work.
+
+    Gated: installing a game, and shutting the computer down when a
+    download finishes. _watch_and_shutdown used to be reachable with no
+    human anywhere near it — the model set shutdown_when_done and a
+    background thread powered the machine off once Steam went quiet.
+    That second, ungated shutdown path now goes through the same
+    on-screen confirmation as computer_settings' restart/shutdown.
+
+    NOT gated: a plain update. The --scheduled entry point below calls
+    this function with no interface bound, where confirm.request
+    refuses by design — gating updates would silently kill the
+    scheduled updates the user themselves set up. Updates only touch
+    games already installed; a NEW game is an install, and installs ask.
+    """
+    p        = parameters or {}
+    action   = p.get("action", "update").lower().strip()
+    shutdown = str(p.get("shutdown_when_done", "false")).lower() == "true"
+    game     = (p.get("game_name") or "").strip()
+
+    if action == "install" or (action == "update" and shutdown):
+        if confirm.pending_title():
+            return outcome.ask(
+                "game_updater",
+                "there is already a confirmation waiting on screen - "
+                "the user has to answer that one first",
+                wanted=action)
+        if shutdown:
+            title = ("Install the game, then shut down" if action == "install"
+                     else "Update games, then shut down")
+            detail = ("When the downloads finish, this computer powers "
+                      "off. Anything unsaved will be lost.")
+        else:
+            title = f"Install {game}" if game else "Install a game"
+            detail = "The game is downloaded and installed via Steam / Epic."
+        return confirm.request(
+            key="game_install", title=title, detail=detail,
+            run=lambda: _game_updater_impl(parameters, player, speak))
+
+    return _game_updater_impl(parameters, player, speak)
+
+
+def _game_updater_impl(parameters: dict, player=None, speak=None) -> str:
     p         = parameters or {}
     action    = p.get("action",    "update").lower().strip()
     platform  = p.get("platform",  "both").lower().strip()

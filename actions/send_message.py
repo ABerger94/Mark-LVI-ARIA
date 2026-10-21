@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from core import outcome
+from core import confirm, outcome
 from core.lazyimport import LazyModule, installed
 
 # Imported on first USE, not at launch — see core/lazyimport.py. PAUSE is 0.06
@@ -344,6 +344,33 @@ def send_message(
     if player:
         player.write_log(f"[msg] {platform} → {receiver}")   # the message itself IS the news
 
+    # ── The gate (blueprint D3) ──────────────────────────────────────
+    # A sent message is the one output of this assistant that cannot be
+    # taken back, so sending sits behind the on-screen confirmation —
+    # core/confirm.py's token, pressed by a human, exactly like
+    # restart/shutdown. The send itself (thread, report-back) is
+    # unchanged; it just starts from _begin_send when the user confirms
+    # instead of from the tool call.
+    if confirm.pending_title():
+        return outcome.ask(
+            "send_message",
+            "there is already a confirmation waiting on screen - the "
+            "user has to answer that one first",
+            to=receiver, platform=platform)
+
+    return confirm.request(
+        key="send_message",
+        title=f"Send a message to {receiver} on {platform}",
+        detail=(f'"{preview}" — typed into {platform} and sent as you. '
+                f"Once it is sent, it cannot be taken back."),
+        run=lambda: _begin_send(player, platform, receiver, message_text),
+    )
+
+
+def _begin_send(player, platform: str, receiver: str,
+                message_text: str) -> str:
+    """Start the send — what ran at tool-call time before the gate,
+    now run when the user presses CONFIRM."""
     threading.Thread(
         target=_send_and_report,
         args=(player, platform, receiver, message_text),
@@ -411,7 +438,11 @@ TOOL = {
     "name": "send_message",
     "description": (
         "Sends a text message via WhatsApp, Telegram, or another messaging "
-        "platform. Write 'message_text' in the USER'S OWN LANGUAGE, exactly "
+        "platform. Sending is GATED: the tool puts a confirmation on the "
+        "user's screen and the message is only typed when they press "
+        "CONFIRM - on the confirmation-pending reply, say that it needs "
+        "their confirmation on screen, and never claim it is being sent "
+        "yet. Write 'message_text' in the USER'S OWN LANGUAGE, exactly "
         "what they asked to be said. "
         "This tool answers immediately and sends in the background. On "
         "status=started say only that you are sending it, never that it is "
