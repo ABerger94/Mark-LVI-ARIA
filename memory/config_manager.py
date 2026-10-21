@@ -1,6 +1,10 @@
 import json
+import os
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
+from threading import RLock
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -11,37 +15,195 @@ BASE_DIR    = get_base_dir()
 CONFIG_DIR  = BASE_DIR / "config"
 CONFIG_FILE = CONFIG_DIR / "api_keys.json"
 
+BACKUP_KEEP = 5
+_lock       = RLock()
+
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 def config_exists() -> bool:
     return CONFIG_FILE.exists()
 
-def save_api_keys(gemini_api_key: str) -> None:
-    ensure_config_dir()
+# ── The store: one write funnel, rolling backups, load recovery ────────────
+#
+# This file holds the Gemini key, every Phase E credential (the Gmail
+# app password, the secret calendar URL, the GitHub token) and every
+# setting the app has. It used to be written IN PLACE by a dozen
+# setters, and load_api_keys() swallowed any parse error into {} — so
+# one torn write (a crash, a full disk, a kill mid-save) silently
+# reset the ENTIRE configuration: no backup, no incident, no trace,
+# and the next setter cheerfully wrote the empty wreckage over what
+# was left of the evidence.
+#
+# Phase G1 cured exactly this disease in the memory store; this is
+# the same cure, in the same shape, applied here:
+#
+#   * write_config() is the ONE way the config reaches disk —
+#     serialised to a temp file in the same directory and
+#     os.replace()d over the live file, so a failed write leaves the
+#     previous valid config in place, never a torn half-file.
+#   * Before each replace, the outgoing file is snapshotted into
+#     config/backups/ — the last BACKUP_KEEP copies THAT PARSE. A
+#     backup of a corrupt file is worse than no backup: it would
+#     occupy a slot the recovery walk trusts.
+#   * load_api_keys() distinguishes a missing file (a fresh install:
+#     {}, no incident) from a present-but-unreadable one (recover
+#     from the backups, record an incident, leave a note for the
+#     startup briefing). The silent swallow is gone.
 
-    data: dict = {}
-    if CONFIG_FILE.exists():
+def _parse_config(text: str) -> dict | None:
+    """Parse config text; the dict, or None when the text is not a
+    usable config (bad JSON, or JSON that isn't an object)."""
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _backup_slots() -> list[Path]:
+    """Backup file paths, newest first (slot 1 is the most recent)."""
+    d = CONFIG_FILE.parent / "backups"
+    return [d / f"api_keys.{i}.json" for i in range(1, BACKUP_KEEP + 1)]
+
+
+def _snapshot_backup() -> None:
+    """Copy the CURRENT live config into the backup rotation — but
+    only if it still parses (see the banner above). Never raises; a
+    failed backup costs a snapshot, not a save."""
+    try:
+        if not CONFIG_FILE.exists():
+            return
+        if _parse_config(CONFIG_FILE.read_text(encoding="utf-8")) is None:
+            return
+        slots = _backup_slots()
+        slots[0].parent.mkdir(parents=True, exist_ok=True)
+        for i in range(len(slots) - 1, 0, -1):
+            if slots[i - 1].exists():
+                os.replace(slots[i - 1], slots[i])
+        shutil.copyfile(CONFIG_FILE, slots[0])
+    except Exception as e:
+        print(f"[Config] ⚠️ Backup failed: {e}")
+
+
+def write_config(data: dict, *, indent: int = 4) -> None:
+    """The one way the config reaches disk. Every setter in this file
+    — and the out-of-file writers that used to open-code their own
+    write_text (ui.py's identity/setup saves,
+    actions/screen_processor.py's key cache) — goes through here, so
+    the atomicity and backup properties cannot be bypassed by a new
+    setting added carelessly."""
+    text = json.dumps(data, indent=indent)
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with _lock:
+        _snapshot_backup()
+        tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
         try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, CONFIG_FILE)
         except Exception:
-            data = {}
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
+
+# Set when a load had to recover (or give up), cleared when the
+# startup briefing speaks it once — see pop_recovery_note().
+_recovery_note: str | None = None
+
+
+def pop_recovery_note() -> str | None:
+    """The one-line note from the most recent load-time recovery, or
+    None when recent loads were clean. Consumed by reading: a
+    recovery is announced once, in the startup briefing, not repeated
+    on every load — the incident record is the durable copy."""
+    global _recovery_note
+    note, _recovery_note = _recovery_note, None
+    return note
+
+
+def save_api_keys(gemini_api_key: str) -> None:
+    data = load_api_keys()
     data["gemini_api_key"] = gemini_api_key.strip()
+    write_config(data, indent=2)
 
-    CONFIG_FILE.write_text(
-        json.dumps(data, indent=2),
-        encoding="utf-8"
-    )
 
 def load_api_keys() -> dict:
     if not CONFIG_FILE.exists():
+        # A missing file is a fresh install, not damage: no config
+        # has ever been written here. (Backups are only consulted when
+        # a config EXISTS but cannot be read — see
+        # _recover_from_backups.)
         return {}
+    with _lock:
+        data = None
+        try:
+            data = _parse_config(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[Config] ⚠️ Load error: {e}")
+        if data is not None:
+            return data
+        return _recover_from_backups()
+
+
+def _recover_from_backups() -> dict:
+    """The live config exists but cannot be read. Walk the backups
+    newest → oldest; the first that parses becomes the config again.
+
+    This replaces the old behaviour — print one line, return {} —
+    under which a single torn write silently cost the user every key
+    and connection they had ever configured, with no record anywhere
+    that it had happened. Recovery (and total loss) are both
+    recorded as incidents, and both leave a note for the startup
+    briefing: the user hears about it from the assistant, once, in
+    plain words — they do not find out later, when an action starts
+    claiming Gmail was never connected."""
+    global _recovery_note
+    from core import incidents
+    slots = [s for s in _backup_slots() if s.exists()]
+    for depth, slot in enumerate(slots, start=1):
+        try:
+            data = _parse_config(slot.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+        if data is None:
+            continue
+        try:
+            write_config(data)
+        except Exception as e:
+            print(f"[Config] ⚠️ Restore write failed: {e}")
+        msg = (f"api_keys.json unreadable; restored from backup "
+               f"{depth} of {len(slots)} ({slot.name})")
+        print(f"[Config] 🛟 Recovered: {msg}")
+        incidents.record("config", "config_recovered", msg)
+        _recovery_note = (
+            "A note about my settings: my configuration file was "
+            "damaged, so I restored it from a backup — a change made "
+            "very recently may have reverted.")
+        return data
+    print("[Config] 🛟 No readable backup — starting with an empty configuration")
+    incidents.record("config", "config_lost",
+                     "api_keys.json unreadable and no backup parsed; "
+                     "configuration started empty")
+    _recovery_note = (
+        "A note about my settings: my configuration file was damaged "
+        "and no backup could be read, so my settings and saved "
+        "connections have reset — you may need to connect things "
+        "again.")
+    # Heal the file: move the unreadable config aside (kept, not
+    # deleted — it is evidence, and a human may yet read something
+    # out of it) and write a valid empty config, so every later load
+    # does not re-walk the backups and re-record the loss.
     try:
-        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        aside = CONFIG_FILE.with_name(
+            f"{CONFIG_FILE.name}.corrupt-{datetime.now():%Y%m%d%H%M%S}")
+        os.replace(CONFIG_FILE, aside)
+        write_config({})
     except Exception as e:
-        print(f"❌ Failed to load api_keys.json: {e}")
-        return {}
+        print(f"[Config] ⚠️ Could not reset the damaged config: {e}")
+    return {}
 
 def get_gemini_key() -> str | None:
     return load_api_keys().get("gemini_api_key")
@@ -63,16 +225,10 @@ def get_user_name() -> str:
 
 def save_assistant_config(assistant_name: str, user_name: str) -> None:
     """Persist assistant name and user name to config."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     data["assistant_name"] = assistant_name.strip() or "ARIA"
     data["user_name"] = user_name.strip()
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 # ── Assistant voice ──────────────────────────────────────────────────────────
@@ -92,16 +248,10 @@ def get_voice() -> str:
 def save_voice(voice_name: str) -> None:
     """Persist the chosen Live voice. Unknown names collapse to the default so a
     bad value can never reach the API and break the session."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     v = (voice_name or "").strip()
     data["voice_name"] = v if v in AVAILABLE_VOICES else DEFAULT_VOICE
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 def get_wake_word_enabled() -> bool:
@@ -110,15 +260,9 @@ def get_wake_word_enabled() -> bool:
 
 
 def save_wake_word_enabled(enabled: bool) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     data["wake_word_enabled"] = bool(enabled)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 def get_push_to_talk_enabled() -> bool:
@@ -204,18 +348,12 @@ def get_turn_tuning() -> dict:
 
 
 def save_turn_tuning(values: dict) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     cur = data.get("turn_tuning")
     cur = dict(cur) if isinstance(cur, dict) else {}
     cur.update(values or {})
     data["turn_tuning"] = cur
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 def get_proactive_audio_enabled() -> bool:
@@ -254,15 +392,9 @@ def save_media_resolution(value: str) -> None:
 
 def _save_flag(key: str, value) -> None:
     """Read-modify-write one key without disturbing the rest of the config."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     data[key] = bool(value) if isinstance(value, bool) else value
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 def get_brief_enabled() -> bool:
@@ -270,15 +402,9 @@ def get_brief_enabled() -> bool:
 
 
 def save_brief_enabled(enabled: bool) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     data["morning_brief_enabled"] = enabled
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 # ── Audio devices ────────────────────────────────────────────────────────────
@@ -294,15 +420,9 @@ def _patch_config(**fields) -> None:
     Every setter in this file open-coded this. Collapsing it here means a new
     setting is one line, and there is one place where a corrupt config file is
     handled instead of nine."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     data.update(fields)
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 def get_input_device() -> str:
@@ -349,13 +469,7 @@ def get_plugin_setting(namespace: str, key: str, default=None):
 def save_plugin_config(namespace: str, values: dict) -> None:
     """Merge `values` into a namespace's stored config (read-modify-write, like
     every other helper here). Only the provided keys are touched."""
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     pc = data.get("plugin_config")
     if not isinstance(pc, dict):
         pc = {}
@@ -365,23 +479,17 @@ def save_plugin_config(namespace: str, values: dict) -> None:
     cur.update(values)
     pc[namespace] = cur
     data["plugin_config"] = pc
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 def save_plugin_enabled(plugin_name: str, enabled: bool) -> None:
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
     plugins_cfg = data.get("plugins_enabled")
     if not isinstance(plugins_cfg, dict):
         plugins_cfg = {}
     plugins_cfg[plugin_name] = enabled
     data["plugins_enabled"] = plugins_cfg
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 # ── Providers: local STT/LLM/TTS and non-Gemini APIs ─────────────────────────
 # Stored here rather than in a file of their own, for the same reason plugin
@@ -514,13 +622,7 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
     `None` leaves a section alone; `creds` is merged per provider so a panel
     that only edited one does not have to send the others.
     """
-    ensure_config_dir()
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+    data = load_api_keys()
 
     block = data.get("providers")
     block = dict(block) if isinstance(block, dict) else {}
@@ -549,7 +651,7 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
         block["sidecar_first"] = bool(sidecar_first)
 
     data["providers"] = block
-    CONFIG_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    write_config(data)
 
 
 # ── Connections (Phase E) ───────────────────────────────────────────────────
