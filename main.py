@@ -335,8 +335,9 @@ def _load_system_prompt() -> str:
         return PROMPT_PATH.read_text(encoding="utf-8")
     except Exception:
         return (
-            "You are JARVIS, Tony Stark's AI assistant. "
-            "Be concise, direct, and always use the provided tools to complete tasks. "
+            "You are ARIA (A.R.I.A. — Adaptive Robotic Intelligence Agent), "
+            "a familiar bound to Alek: warm, direct, and concise. "
+            "Always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
 
@@ -414,7 +415,7 @@ TOOL_DECLARATIONS = [
         "name": "manage_monitor",
         "description": (
             "Add, remove, or list background monitoring topics. "
-            "JARVIS checks these topics once a day and alerts the user when there is a new development. "
+            "You check these topics once a day and alert the user when there is a new development. "
             "Use 'add' when the user says 'monitor X', 'track X', 'follow X'. "
             "Use 'remove' when the user says 'stop monitoring X'. "
             "Use 'list' when the user asks what is being monitored. "
@@ -440,7 +441,7 @@ TOOL_DECLARATIONS = [
         "description": (
             "Shuts down the assistant completely. "
             "Call this when the user expresses intent to end the conversation, "
-            "close the assistant, say goodbye, or stop Jarvis. "
+            "close the assistant, say goodbye, or stop the assistant. "
             "The user can say this in ANY language."
         ),
         "parameters": {
@@ -576,7 +577,7 @@ class JarvisLive:
         # reconnect: a dropped connection is not news about Wayland.
         self._platform_notes_shown = False
         self.ui             = ui
-        self._asst_name     = "JARVI    S"   # updated each session from config
+        self._asst_name     = "ARIA"   # updated each session from config
         self.session              = None
         self.audio_in_queue       = None
         self.out_queue            = None
@@ -1086,10 +1087,10 @@ class JarvisLive:
         # Load customization from config
         try:
             _cfg = json.loads(open(API_CONFIG_PATH, encoding="utf-8").read())
-            self._asst_name = (_cfg.get("assistant_name") or "JARVIS").strip()
+            self._asst_name = (_cfg.get("assistant_name") or "ARIA").strip()
             _user_name = (_cfg.get("user_name") or "").strip()
         except Exception:
-            self._asst_name = "JARVIS"
+            self._asst_name = "ARIA"
             _user_name = ""
 
         memory     = load_memory()
@@ -1110,12 +1111,13 @@ class JarvisLive:
         # already knows the respectful register of whatever language it is in.
         _addr = (f"ADDRESS: Always call the user '{_user_name}'."
                  if _user_name
-                 else 'ADDRESS: Address the user with the ordinary respectful form '
-                      'for a superior in the language you are currently speaking — '
-                      '"sir" in English, its everyday equivalent in any other '
-                      'language. Never an archaic or aristocratic form, and never '
-                      'the form from a different language than the one you are '
-                      'speaking in this sentence.')
+                 else 'ADDRESS: Call the user by the name you know for them '
+                      'from your memory; until you know it, use the plain '
+                      'direct second person of the language you are currently '
+                      'speaking. No honorifics and no butler register — you are '
+                      'his familiar, not his staff — and never a form from a '
+                      'different language than the one you are speaking in this '
+                      'sentence.')
         identity_ctx = (
             f"[IDENTITY]\n"
             f"Your name is {self._asst_name}. "
@@ -2445,11 +2447,11 @@ class JarvisLive:
                         self._ensure_wake_detector()
                         self._awake = False
                         self.ui.set_state("SLEEPING")
-                        self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
+                        self.ui.write_log(f"SYS: {self._asst_name} online — sleeping. Say 'Hey Jarvis' to wake me.")
                     else:
                         self._awake = True
                         self.ui.set_state("LISTENING")
-                        self.ui.write_log("SYS: JARVIS online.")
+                        self.ui.write_log(f"SYS: {self._asst_name} online.")
 
                     # What this machine will not permit, said once, on screen.
                     #
