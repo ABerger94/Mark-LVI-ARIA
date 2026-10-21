@@ -329,18 +329,24 @@ There is also an **output volume slider**, and it belongs to the device chosen t
 
 ### 📱 The phone dashboard
 
-**It is plain HTTP on your local network, and that is a decision rather than an
-oversight.** This release tried making TLS mandatory and it was a mistake worth
-writing down: the certificate has to be self-signed, because no certificate
-authority will vouch for `192.168.1.108`, and a phone treats a self-signed
-certificate as an attack. Chrome shows a full-page interstitial. A QR scanner
-that opens links in its own in-app browser often shows a blank page and offers
-no way through at all, because those views have no "Advanced" button by design.
+**It is HTTPS on your local network by default, with a self-signed
+certificate generated for you on first run.** A release that made TLS
+mandatory was a mistake worth writing down: no certificate authority will
+vouch for `192.168.1.108`, and a phone treats a self-signed certificate as an
+attack. Chrome shows a full-page interstitial. A QR scanner that opens links
+in its own in-app browser often shows a blank page and offers no way through
+at all, because those views have no "Advanced" button by design.
 
-A dashboard nobody can reach is not a more secure product than one they can. So
-HTTPS is opt-in — `"dashboard_https": true` in `config/api_keys.json`, and the
-certificate is generated for you — and everything else that actually guards the
-door stayed:
+The next release swung to opt-in plain HTTP — reachable, but the command
+channel, and the encryption layer that needs a secure context, stayed off for
+every install that never found the setting. The current settlement keeps the
+reachability fixes (the QR code carries the secure address directly, a
+hand-typed address is redirected to it, accepting the certificate is a
+once-per-device tap) and flips the default: HTTPS unless `"dashboard_https":
+false` in `config/api_keys.json` says otherwise, and if a certificate cannot
+be generated at all the dashboard starts on plain HTTP and says so loudly
+rather than not starting. Everything else that actually guards the door
+stayed:
 
 * The pairing key is **eight characters through PBKDF2 at 200,000 rounds**,
   not six through a single round of SHA-256. That was an offline search

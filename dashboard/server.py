@@ -1,10 +1,13 @@
 """
 dashboard/server.py — ARIA Local HTTP Dashboard
 
-HTTPS on port 8000 with a self-signed certificate generated on first run, plus
-a second layer inside it: commands are encrypted with AES-256-GCM under a key
-derived from the pairing code with PBKDF2. Both layers are required — the
-server refuses to start without TLS rather than quietly serving in clear.
+HTTPS on port 8001 with a self-signed certificate generated on first run
+(port 8000 answers plain HTTP only to redirect hand-typed addresses to the
+secure port), plus a second layer inside it: commands are encrypted with
+AES-256-GCM under a key derived from the pairing code with PBKDF2. HTTPS is
+the default — "dashboard_https": false in config/api_keys.json is the only
+opt-out — and when a certificate cannot be generated the server says so
+loudly and falls back to plain HTTP rather than not starting at all.
 
 Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 """
@@ -82,6 +85,13 @@ def _get_gemini_key() -> str | None:
 
 _KEY_CHARS = [c for c in (string.ascii_uppercase + string.digits)
               if c not in ('O', 'I', 'L', '0', '1')]
+
+# How long a pairing key is — the ONE definition, used by new_key() and read
+# by the tests that pin the login page against it. The page once capped its
+# input at six characters while the server issued eight, which made manual
+# pairing impossible by construction: every correct key was truncated by the
+# page before it was ever sent.
+PAIRING_KEY_LENGTH = 8
 
 # ── AES-256-CBC ───────────────────────────────────────────────────────────────
 _AES_SALT = b'JARVIS-DASHBOARD-v1'
@@ -697,44 +707,69 @@ class DashboardServer:
     def new_key(self, expiry_secs: int = 600) -> str:
         now = time.time()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
-        key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(8))
+        key = ''.join(secrets.choice(_KEY_CHARS)
+                      for _ in range(PAIRING_KEY_LENGTH))
         self._pending_keys[key] = now + expiry_secs
         return key
 
     @staticmethod
-    def _ssl_enabled() -> bool:
-        """Is HTTPS switched on? Off unless the user asked for it.
+    def _https_wanted() -> bool:
+        """The user's HTTPS choice: on, unless they switched it off.
 
-        WHY THE DEFAULT IS PLAIN HTTP, AFTER A RELEASE THAT MADE TLS MANDATORY
-            The certificate has to be self-signed — there is no certificate
-            authority on earth that will vouch for 192.168.1.108 — and a phone
-            treats a self-signed certificate as an attack. Chrome shows a
-            full-page interstitial; a QR scanner that opens links in its own
-            in-app browser often shows nothing at all and offers no way to
-            proceed, because those views deliberately have no "Advanced" button.
-
-            So the practical result of requiring TLS was a dashboard nobody
-            could reach, which is not a more secure product than one they can.
-            The pairing key, the rate limit, the token expiry and the
-            revoke-all-devices fix are all unaffected and all still apply.
-
-            What IS lost over plain HTTP is the AES-GCM layer, because
-            `crypto.subtle` does not exist outside a secure context. The page
-            says so on its own badge rather than pretending, and commands then
-            travel the local network in clear — which is what this dashboard
-            did for every release before this one.
-
-            Turn it on with "dashboard_https": true in config/api_keys.json if
-            the network is one where that matters; the certificate is generated
-            automatically and you will have to accept it once per device.
+        Read fresh on every call — serve() consults it before generating a
+        certificate and _ssl_enabled() after, and the two must agree.
+        Anything but an explicit false in config/api_keys.json means on:
+        a missing file, a missing key, an unreadable config all default to
+        the encrypted dashboard.
         """
         try:
             import json as _json
             with open(BASE_DIR / "config" / "api_keys.json", "r",
                       encoding="utf-8") as f:
-                if not _json.load(f).get("dashboard_https"):
-                    return False
+                return bool(_json.load(f).get("dashboard_https", True))
         except Exception:
+            return True
+
+    @staticmethod
+    def _ssl_enabled() -> bool:
+        """Is HTTPS actually in force? Wanted (see _https_wanted) AND a
+        certificate pair exists to serve with.
+
+        WHY THE DEFAULT IS ON, AFTER A RELEASE THAT MADE IT OPT-IN
+            The opt-in era was a deliberate trade, and its reasoning was
+            sound: the certificate has to be self-signed — there is no
+            certificate authority on earth that will vouch for 192.168.1.108
+            — and a phone treats a self-signed certificate as an attack.
+            Chrome shows a full-page interstitial; a QR scanner that opens
+            links in its own in-app browser often shows nothing at all and
+            offers no way to proceed, because those views deliberately have
+            no "Advanced" button. Requiring TLS with no way through made a
+            dashboard nobody could reach, which is not a more secure
+            product than one they can.
+
+            What the trade cost was the default. Every install that never
+            found the setting served its command channel in clear — and
+            over plain HTTP there is no `crypto.subtle`, so the AES-GCM
+            layer does not exist either; the page said so on its own badge
+            rather than pretending, but commands still travelled the local
+            network unencrypted. The pairing key, the rate limit, the
+            token expiry and the revoke-all-devices fix were all unaffected
+            and all still apply.
+
+            So the settlement, per the ARIA migration blueprint (S2): the
+            certificate is generated automatically on first run, the QR
+            code carries the https address directly, the plain port still
+            answers hand-typed addresses and redirects them, and accepting
+            the certificate is a once-per-device tap. On by default;
+            "dashboard_https": false in config/api_keys.json is the opt-out.
+
+            The fallback contract is unchanged: wanted but not makeable —
+            the cryptography package missing, the pair unwritable — means
+            serve() starts on plain HTTP with loud warnings rather than
+            not starting at all. A dashboard that does not start is not
+            more secure, it is absent.
+        """
+        if not DashboardServer._https_wanted():
             return False
         certs = BASE_DIR / "config" / "certs"
         return (certs / "jarvis.key").exists() and (certs / "jarvis.crt").exists()
@@ -1185,16 +1220,12 @@ class DashboardServer:
         asyncio.get_event_loop().run_in_executor(
             None, _ensure_network_access, PORT, SECURE_PORT)
 
-        # Only make a certificate if HTTPS was actually asked for. Generating
-        # one nobody uses just leaves a private key on disk.
-        try:
-            import json as _json
-            with open(BASE_DIR / "config" / "api_keys.json", "r",
-                      encoding="utf-8") as f:
-                if _json.load(f).get("dashboard_https"):
-                    _ensure_certs()
-        except Exception:
-            pass
+        # Make a certificate whenever HTTPS is wanted — which is every
+        # install that has not explicitly opted out. Generating one nobody
+        # uses just leaves a private key on disk; the opt-out is the only
+        # nobody-uses case there is.
+        if self._https_wanted():
+            _ensure_certs()
 
         use_ssl  = self._ssl_enabled()
         ssl_key  = BASE_DIR / "config" / "certs" / "jarvis.key"
@@ -1218,9 +1249,17 @@ class DashboardServer:
         else:
             print("[Dashboard] Plain HTTP on your local network. Commands are "
                   "not encrypted; the pairing key still gates access.")
-            print('[Dashboard] For HTTPS set "dashboard_https": true in '
-                  'config/api_keys.json (your phone will ask you to trust the '
-                  'certificate once).')
+            if self._https_wanted():
+                print("[Dashboard] HTTPS is on but no certificate could be "
+                      "made. Install the cryptography package "
+                      "(pip install cryptography) and restart for the "
+                      "encrypted dashboard.")
+            else:
+                print('[Dashboard] HTTPS is off because "dashboard_https" is '
+                      'false in config/api_keys.json. Set it to true (or '
+                      'delete the setting) and restart for the encrypted '
+                      'dashboard — your phone will ask you to trust the '
+                      'certificate once.')
 
         cfg = uvicorn.Config(
             self.app, host="0.0.0.0",
