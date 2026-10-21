@@ -43,6 +43,7 @@ EXAMPLE_PHRASES = {
     "code_helper":       "Explain what this script does",
     "dev_agent":         "Build me a to-do list app",
     "video_player":      "Play a video of the ocean",
+    "spotify":           "What's playing on Spotify?",
 }
 
 _SOURCE_ORDER = ("Built-in", "Action", "Plugin")

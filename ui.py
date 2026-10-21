@@ -1000,6 +1000,50 @@ class MetricBar(QWidget):
 
         p.end()
 
+class SpotifyPanel(QWidget):
+    """The Spotify corner of the SYS rail: what is playing, from the
+    window-title telemetry in core/spotify.py, or a quiet 'Not playing'.
+
+    Fed by MainWindow._update_metrics alongside the bars. It never shows
+    an error: no Spotify window, a platform without title telemetry, a
+    hiccup in the probe — all of them are the same quiet state, because
+    a music panel that can fail loudly is worse than one that simply
+    says nothing is playing."""
+
+    def __init__(self):
+        super().__init__()
+        self.setStyleSheet(
+            f"background: {C.PANEL2}; border: 1px solid {C.BORDER}; border-radius: 4px;"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 5, 6, 5)
+        lay.setSpacing(2)
+
+        hdr = QLabel("♪ SPOTIFY")
+        hdr.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {C.GREEN}; background: transparent; border: none;")
+        lay.addWidget(hdr)
+
+        self._track_lbl = QLabel("Not playing")
+        self._track_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._track_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent; border: none;")
+        self._track_lbl.setWordWrap(True)
+        lay.addWidget(self._track_lbl)
+
+        self._artist_lbl = QLabel("")
+        self._artist_lbl.setFont(QFont("Courier New", 7))
+        self._artist_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent; border: none;")
+        self._artist_lbl.setWordWrap(True)
+        lay.addWidget(self._artist_lbl)
+
+    def show_state(self, info: dict) -> None:
+        if info and info.get("playing"):
+            self._track_lbl.setText(info.get("track") or info.get("title") or "Playing")
+            self._artist_lbl.setText(info.get("artist") or "")
+        else:
+            self._track_lbl.setText("Not playing")
+            self._artist_lbl.setText("")
+
 class LogWidget(QTextEdit):
     _sig = pyqtSignal(str)
 
@@ -4667,6 +4711,8 @@ class MainWindow(QMainWindow):
         self._clock_tmr.start(1000)
         self._tick_clock()
 
+        self._spot_t = 0.0   # last Spotify telemetry poll (monotonic)
+
         # Metric update timer
         self._metric_tmr = QTimer(self)
         self._metric_tmr.timeout.connect(self._update_metrics)
@@ -5379,6 +5425,20 @@ class MainWindow(QMainWindow):
         except Exception:
             self._proc_lbl.setText("PROC  --")
 
+        # Spotify — throttled to the metrics cadence: enumerating windows
+        # is not free, and a track title does not change faster than
+        # this. core/spotify caches for a second on top. Any failure is
+        # the quiet state; the panel is never the thing that breaks
+        # the metrics tick.
+        _now_m = time.monotonic()
+        if _now_m - self._spot_t >= 2.0:
+            self._spot_t = _now_m
+            try:
+                from core import spotify as _spotify_core
+                self._spotify_panel.show_state(_spotify_core.now_playing())
+            except Exception:
+                pass
+
 
     def _build_header(self) -> QWidget:
         w = QWidget()
@@ -5521,6 +5581,10 @@ class MainWindow(QMainWindow):
         ip_lay.addWidget(os_lbl)
 
         lay.addWidget(info_panel)
+        lay.addSpacing(4)
+
+        self._spotify_panel = SpotifyPanel()
+        lay.addWidget(self._spotify_panel)
         lay.addSpacing(4)
 
         lay.addStretch()
