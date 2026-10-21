@@ -57,10 +57,14 @@ def _load_config() -> dict:
 
 
 def _save_config_key(key: str, value) -> None:
+    # Through config_manager's write funnel, like every other config
+    # write in the app: an in-place write here could tear the file
+    # that holds every key and connection the assistant has.
     try:
-        cfg = _load_config()
+        from memory.config_manager import load_api_keys, write_config
+        cfg = load_api_keys()
         cfg[key] = value
-        _CONFIG_PATH.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+        write_config(cfg)
     except Exception as e:
         print(f"[Vision] ⚠️  Could not save config key '{key}': {e}")
 
