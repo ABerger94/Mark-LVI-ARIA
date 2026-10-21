@@ -4,10 +4,16 @@ core/pricecheck.py — price-drop watches (ARIA's, ported).
 ARIA's design, kept: a watch is a URL, a target price and a label.
 A check pass fetches each page, extracts a price (JSON-LD product
 markup first — the most reliable signal on a retail page — then the
-lowest $-amount on the page), records it as the last seen price, and
-alerts ONCE when the price lands at or below target: the watch is
-marked alerted so the same drop does not announce itself on every
-pass, exactly as hers behaved.
+lowest $-amount on the page) and records it as the last seen price.
+
+Phase G4 made the alert a CROSSING, where ARIA's was a one-shot
+latch: the watch record carries which side of the target the last
+seen price sits on ("side"), and a pass alerts when the price lands
+at or below target while the watch is not already announced for
+this dip. Staying below stays silent; rising back above target
+re-arms the watch, so a later drop alerts again as the new crossing
+it is. (Under the latch, a watch that dropped once could never
+speak again, even after recovering and dropping a second time.)
 
 Two substrate changes, both following this codebase's precedents
 rather than ARIA's:
@@ -114,6 +120,7 @@ def add_watch(url: str, target: float, label: str = "item") -> dict:
         "label": label or "item",
         "last_price": None,
         "alerted": False,
+        "side": None,
         "created": datetime.now().isoformat(timespec="seconds"),
     }
     data["next_id"] += 1
@@ -137,13 +144,19 @@ def remove_watch(watch_id: int) -> bool:
     return True
 
 
-def check_watches(fetch: Optional[Callable[[str], str]] = None
+def check_watches(fetch: Optional[Callable[[str], str]] = None,
+                  hits: Optional[list] = None
                   ) -> tuple[str, list[str]]:
     """One check pass. Returns (summary, alert lines).
 
     A watch whose page will not load, or shows no extractable price,
     is skipped for this pass — its last_price stands and it is NOT
-    marked alerted, so a transient failure can never eat a drop."""
+    marked alerted, so a transient failure can never eat a drop.
+
+    When `hits` (a list) is supplied, each crossing also appends a
+    structured {"label", "price", "target", "url"} dict to it: the
+    alert lines are the report form (they carry the URL), while the
+    scheduler's spoken form is spoken_alert() over a hit."""
     fetch = fetch or fetch_page
     data = _load()
     watches = data["watches"]
@@ -162,17 +175,33 @@ def check_watches(fetch: Optional[Callable[[str], str]] = None
             continue
         w["last_price"] = price
         dirty = True
-        if price <= float(w["target"]) and not w.get("alerted"):
+        target = float(w["target"])
+        side = "below" if price <= target else "above"
+        if side == "above":
+            w["alerted"] = False   # re-arm: the next drop is a new crossing
+        w["side"] = side
+        if side == "below" and not w.get("alerted"):
             w["alerted"] = True
             alerts.append(
                 f"DROP: '{w['label']}' now ${price:.2f} "
-                f"(target ${float(w['target']):.2f}) — {w['url']}")
+                f"(target ${target:.2f}) — {w['url']}")
+            if hits is not None:
+                hits.append({"label": w["label"], "price": price,
+                             "target": target, "url": w["url"]})
     if dirty:
         _save(data)
     summary = f"Checked {checked} price watch(es)."
     if alerts:
         summary += "\n" + "\n".join(alerts)
     return summary, alerts
+
+
+def spoken_alert(hit: dict) -> str:
+    """The one spoken sentence for a crossing: label and prices
+    only — the report line carries the URL, and a URL read aloud
+    helps nobody."""
+    return (f"Price alert: {hit['label']} is ${hit['price']:.2f}, "
+            f"at or below your ${float(hit['target']):.2f} target.")
 
 
 def render_watches(watches: list[dict]) -> str:
