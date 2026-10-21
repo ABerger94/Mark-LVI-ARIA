@@ -31,10 +31,18 @@ WHAT BELONGS HERE AND WHAT DOES NOT
     Only genuinely irreversible things. Anything that can be reversed should be
     done at once and pushed onto core/undo.py instead — undo is faster than a
     question, and an assistant that asks before every action is one nobody uses.
+
+THE ONE EXCEPTION
+    A routine the user has explicitly trusted replays inside `trusted_scope()`
+    (bottom of this file): its destructive steps run without a banner, because
+    trusting the routine was the human answering this gate's question in
+    advance, for a step list they can inspect. Untrusted routines get no such
+    passage — their destructive steps park here like any live call.
 """
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from dataclasses import dataclass
@@ -86,6 +94,24 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     instruction so the assistant asks the user out loud in their own language,
     rather than reading an English string verbatim."""
     global _pending
+
+    if in_trusted_scope():
+        # A trusted routine is replaying (core/routines.py). The human's
+        # approval for this class of work was given when they trusted the
+        # routine, so the gate's question has already been answered: run
+        # the work now, on the caller's thread, and hand back its REAL
+        # result instead of a pending sentence. No interface is needed —
+        # there is nothing left to ask — so this precedes the unbound
+        # refusal below. See the trusted-scope section at the end of this
+        # file for why a module-global counter is the right shape here.
+        try:
+            result = run() or "Done."
+        except Exception as e:
+            return (f"The action '{title}' failed inside a trusted "
+                    f"routine replay: {e}. Nothing else was done by "
+                    f"this call.")
+        _log(f"SYS: Trusted replay — {title}. {result}")
+        return result
 
     if _show_cb is None:
         # No interface bound (headless, or a very early call). Refuse rather
@@ -159,3 +185,55 @@ def pending_title() -> str:
         if time.monotonic() - _pending.at > TIMEOUT_SECONDS:
             return ""
         return _pending.title
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Trusted scope — the one sanctioned way past the gate
+# ─────────────────────────────────────────────────────────────────────────────
+# A routine the user has explicitly trusted (core/routines.py) replays its
+# steps without asking about each one: the trust WAS the confirmation, given
+# once, for a named, inspectable list of steps the user can read back with
+# describe_routine before trusting. While a trusted replay runs, it enters
+# this scope around each step, and request() above honours it by running the
+# parked callable immediately.
+#
+# WHY A MODULE-GLOBAL COUNTER AND NOT A THREAD-LOCAL OR A PARAMETER
+#   The gate is consulted deep inside action handlers, on executor threads
+#   the replay does not own: a replay dispatches a step, the step hops
+#   threads twice (event loop, then worker pool) before an action calls
+#   request(). A thread-local set by the replay never arrives there, and
+#   threading a "preauthorized" parameter through every action signature —
+#   ARIA's design — is exactly the model-visible surface this module exists
+#   to remove. A plain counter is the shape that survives the hops.
+#
+# WHY THAT IS SAFE ENOUGH HERE
+#   Replays are serialised by core/routines (one at a time, under a lock),
+#   the scope is entered per step and left the moment the step returns, and
+#   a replay occupies the conversation turn — the model is not issuing
+#   unrelated gated calls concurrently. The window in which any gated call
+#   would skip its question is the execution of a step in a routine the
+#   user already trusted.
+_trusted_lock  = threading.Lock()
+_trusted_depth = 0
+
+
+@contextlib.contextmanager
+def trusted_scope():
+    """Mark the enclosed dispatch as already-approved human intent.
+
+    Only core/routines.py enters this, only around steps of a routine whose
+    stored `trusted` flag is set. Nesting is counted, so a scope inside a
+    scope behaves."""
+    global _trusted_depth
+    with _trusted_lock:
+        _trusted_depth += 1
+    try:
+        yield
+    finally:
+        with _trusted_lock:
+            _trusted_depth -= 1
+
+
+def in_trusted_scope() -> bool:
+    with _trusted_lock:
+        return _trusted_depth > 0
