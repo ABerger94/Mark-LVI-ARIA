@@ -792,7 +792,6 @@ def focus(match: "Match") -> bool:
             return False
         try:
             import ctypes
-            from ctypes import wintypes
 
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)

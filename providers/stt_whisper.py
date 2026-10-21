@@ -43,7 +43,6 @@ import asyncio
 import os
 import time
 from importlib.util import find_spec
-from typing import Optional
 
 from . import audio
 from .base import DEFAULT_CAPS, Field

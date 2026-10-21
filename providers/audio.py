@@ -87,7 +87,6 @@ def to_mono(pcm: bytes, channels: int) -> bytes:
     stereo even when asked for mono, and playing that as mono halves the pitch."""
     if channels <= 1 or not pcm:
         return pcm
-    import numpy as np
     arr = to_float32(pcm)
     usable = (arr.size // channels) * channels
     return to_pcm16(arr[:usable].reshape(-1, channels).mean(axis=1))

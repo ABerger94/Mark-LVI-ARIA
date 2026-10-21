@@ -16,14 +16,12 @@ Supported types:
   pptx    → summarize, extract_text, to_pdf
 """
 
-import os
 import re
 import json
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from datetime import datetime
 
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
