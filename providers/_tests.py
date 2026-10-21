@@ -1028,18 +1028,31 @@ def test_panel_settings_survive():
 
         import pathlib
         writes = [0]
-        real = pathlib.Path.write_text
+        real_write_text = pathlib.Path.write_text
+        real_replace = os.replace
 
-        def counted(self, *a, **k):
+        def counted_write_text(self, *a, **k):
             if self.name == "api_keys.json":
                 writes[0] += 1
-            return real(self, *a, **k)
+            return real_write_text(self, *a, **k)
 
-        pathlib.Path.write_text = counted
+        def counted_replace(src, dst, *a, **k):
+            # The config store writes atomically now (temp file +
+            # os.replace — see memory/config_manager.write_config),
+            # so a live-file replacement counts as a write too. A
+            # regression to several writes fails either way; backup
+            # rotation replaces api_keys.N.json, never the live name.
+            if pathlib.Path(dst).name == "api_keys.json":
+                writes[0] += 1
+            return real_replace(src, dst, *a, **k)
+
+        pathlib.Path.write_text = counted_write_text
+        os.replace = counted_replace
         try:
             ov._apply()
         finally:
-            pathlib.Path.write_text = real
+            pathlib.Path.write_text = real_write_text
+            os.replace = real_replace
 
         check("APPLY writes the config once", writes[0] == 1, str(writes[0]))
         check("the mode was stored", get_provider_mode() == "pipeline",
