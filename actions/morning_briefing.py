@@ -243,14 +243,16 @@ def _fetch_news_block(topics, news_fetch):
 
 
 def _recovery_note_suffix() -> str:
-    """The memory store's recovery note (Phase G1), appended once to
-    whichever delivery speaks first. When the store had to be
-    restored from a backup — or could not be — Alek hears it here, in
-    the greeting, in plain words: not as a console line he will never
-    see, and not discovered later by being forgotten. Empty string
-    when recent loads were clean."""
-    note = memory_manager.pop_recovery_note()
-    return f" {note}" if note else ""
+    """The stores' recovery notes — memory (Phase G1) and config (its
+    follow-up) — appended once to whichever delivery speaks first.
+    When a store had to be restored from a backup — or could not be
+    — Alek hears it here, in the greeting, in plain words: not as a
+    console line he will never see, and not discovered later by being
+    forgotten. Empty string when recent loads were clean."""
+    notes = [note for note in (memory_manager.pop_recovery_note(),
+                               config_manager.pop_recovery_note())
+             if note]
+    return (" " + " ".join(notes)) if notes else ""
 
 
 # ── The one composition ─────────────────────────────────────────────────────
