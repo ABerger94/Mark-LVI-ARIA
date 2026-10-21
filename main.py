@@ -173,6 +173,19 @@ _TAIL_MARGIN = 0.25
 # while turning an unbounded hang into a blip.
 _STALL_LIMIT = 30.0
 
+# Engine failover (Phase G2): how many unrecovered Live failures inside
+# how long a window mean the session is not coming back by reconnecting.
+# The existing cadence is the yardstick: a generic failure retries after
+# 3 s, network backoff doubles to a 60 s cap, and the stall watchdog
+# already calls a session dead after 30 s of silence. Three failures
+# inside two minutes is at least three full reconnect cycles the
+# machinery could not recover — spanning several times the longest
+# single wait below the cap — while one transient drop, or two failures
+# minutes apart, never reach it. (The other trigger needs no numbers:
+# every Live rung resting at once — core/gemini.all_live_resting.)
+_FAILOVER_WINDOW_SECONDS = 120.0
+_FAILOVER_FAILURE_LIMIT  = 3
+
 _VIS_WIN = 1024        # ~43 ms analysis window at 24 kHz: enough for formants
 _VIS_HOP = 480         # 20 ms between frames, i.e. 50 shapes a second
 
@@ -630,6 +643,21 @@ class JarvisLive:
         # Set only when a local pipeline is running, so push-to-talk can tell it
         # the turn is over. Live decides that on the server; nothing does here.
         self._engine               = None
+        # Engine failover (Phase G2). _failed_over latches for the rest
+        # of the process run once Live is unrecoverable and a complete
+        # pipeline is configured: _resolve_engine_caps then resolves the
+        # pipeline whatever the saved mode says, and nothing switches
+        # back mid-run — Live returns on the next launch, or when the
+        # user changes the engine in the panel (_on_engine_applied).
+        # _failover_dead remembers that the pipeline would not build at
+        # switch time, so the attempt is never repeated as a loop of
+        # its own. _failover_notice holds the provider label until the
+        # spoken notice has been delivered, exactly once.
+        self._failed_over          = False
+        self._failover_dead        = False
+        self._failover_notice: str | None = None
+        self._failover_outage_noted = False
+        self._live_failure_times: list[float] = []
         # Self-edit watcher (Phase D — ARIA's P4 loop, core/selfedit.py).
         # It snapshots her own source tree NOW, at boot; after every
         # completed turn the receive loop asks it to check (see
@@ -675,6 +703,7 @@ class JarvisLive:
         self.ui.on_interrupt      = self.interrupt
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_audio_device_change = self._on_audio_device_change
+        self.ui.on_engine_applied = self._on_engine_applied   # providers panel: a manual engine choice outranks the failover latch
         self._reconnect_event: asyncio.Event | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
 
@@ -830,6 +859,7 @@ class JarvisLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
+        self._deliver_failover_notice()
 
     def sleep(self, reason: str = "timeout") -> None:
         if not self._awake:
@@ -982,6 +1012,22 @@ class JarvisLive:
         but the conversation is kept, which is the whole reason resumption
         landed before this feature did."""
         self.request_reconnect(keep_context=True, reason="audio device")
+
+    def _on_engine_applied(self):
+        """The providers panel applied a new engine choice.
+
+        A deliberate choice outranks a failover: clear the latch (and
+        the dead-target memory) so the session the panel's own
+        reconnect is already rebuilding resolves whatever the user
+        just picked. If they picked Gemini and it is still down, the
+        triggers simply fire again — a new episode, judged on its own
+        failures."""
+        if self._failed_over or self._failover_dead:
+            print("[Engine] Failover latch cleared — engine changed "
+                  "in the panel.")
+        self._failed_over     = False
+        self._failover_dead   = False
+        self._failover_notice = None
 
     async def _watch_reconnect(self):
         """Session-scoped task: when a voluntary reconnect is requested, raise a
@@ -2399,8 +2445,173 @@ class JarvisLive:
         except Exception:
             return "gemini"
 
+    # ── Engine failover (Phase G2) ─────────────────────────────────────
+    # Gemini Live is the default brain, and its own recovery is good:
+    # the ladder steps down on quota, rejected handles are discarded,
+    # dropped sockets reconnect with backoff. What it cannot survive is
+    # EVERY rung resting at once, or a session that fails faster than
+    # reconnects can land — those two states are the triggers. The
+    # switch itself is not new machinery: the latch below makes
+    # _resolve_engine_caps resolve the pipeline — the exact construction
+    # the providers panel's manual selection uses — on the next pass of
+    # the run loop, and _open_session builds the engine it describes.
+
+    def _pipeline_failover_target(self) -> tuple[bool, str]:
+        """(True, provider label) when the pipeline could take over —
+        or (False, why-not).
+
+        The validation is the startup path's own, verbatim: a language
+        model chosen for the pipeline slot, and registry.missing_fields
+        empty for it. A half-configured pipeline (provider named, model
+        or key still missing) fails this exactly as it fails startup's
+        resolution, and is treated as no provider at all."""
+        try:
+            from memory.config_manager import get_pipeline, get_provider_config
+            from providers import registry
+
+            pipe = get_pipeline()
+            llm_id = str(pipe.get("llm") or "").strip()
+            if not llm_id:
+                return False, "no language model is chosen for the pipeline"
+            cfg = get_provider_config(llm_id)
+            missing = registry.missing_fields(llm_id, cfg)
+            if missing:
+                return False, f"{llm_id} needs: {', '.join(missing)}"
+            # The spoken label: the catalog name the user picked
+            # (Groq, OpenRouter…) when the config names one, else the
+            # provider id — and the model either way, when there is one.
+            name = llm_id
+            catalog_id = str(cfg.get("catalog") or "").strip()
+            if catalog_id:
+                decl = registry.get_declaration(llm_id) or {}
+                for entry in decl.get("catalog", ()):
+                    if entry.get("id") == catalog_id:
+                        name = entry.get("label") or llm_id
+                        break
+            model = str(cfg.get("model") or "").strip()
+            return True, f"{name} ({model})" if model else name
+        except Exception as e:
+            return False, f"pipeline check failed: {e}"
+
+    def _maybe_failover(self, reason: str) -> bool:
+        """Latch this process onto the pipeline engine. True when the
+        latch is set (or already was); the run loop's next pass builds
+        the pipeline through _resolve_engine_caps, unchanged.
+
+        Latched means latched: no switch-back mid-run. Live returns on
+        the next launch, or when the user changes the engine in the
+        panel (_on_engine_applied clears the latch)."""
+        if getattr(self, "_failed_over", False):
+            return True
+        if getattr(self, "_failover_dead", False):
+            return False
+        if self._engine_mode() != "gemini":
+            return False     # the pipeline already holds the conversation
+        try:
+            from memory.config_manager import get_engine_auto_failover
+            if not get_engine_auto_failover():
+                return False
+        except Exception:
+            pass             # an unreadable flag defaults to on, as elsewhere
+        ready, label = self._pipeline_failover_target()
+        if not ready:
+            return False
+        self._failed_over = True
+        self._failover_notice = label
+        print(f"[Engine] Gemini Live is unrecoverable ({reason}) — "
+              f"failing over to {label} for the rest of this run.")
+        self.ui.write_log(
+            f"SYS: Gemini connection lost — switching to {label}.")
+        try:
+            from core import incidents
+            incidents.record("engine", "engine_failover",
+                             f"{reason} — switched to {label}")
+        except Exception:
+            pass
+        return True
+
+    def _note_failover_unavailable(self) -> None:
+        """Live is down and failover cannot help — say why, once per
+        outage episode (the flag resets when a session next comes up).
+
+        The ordinary outage lines keep their own cadence; this is the
+        one addition: the fix, named, once."""
+        if getattr(self, "_failover_outage_noted", False):
+            return
+        self._failover_outage_noted = True
+        try:
+            from memory.config_manager import get_engine_auto_failover
+            if not get_engine_auto_failover():
+                self.ui.write_log(
+                    "SYS: Automatic failover is switched off — set "
+                    "\"engine_auto_failover\": true to enable it, or "
+                    "pick the pipeline engine in ⚙ ENGINE & PROVIDERS.")
+                return
+        except Exception:
+            pass
+        self.ui.write_log(
+            "SYS: No backup engine is configured — a provider key in "
+            "⚙ ENGINE & PROVIDERS enables automatic failover.")
+
+    def _note_live_failure(self) -> None:
+        """One more unrecovered Live failure: feed the window trigger.
+
+        Called from the run loop's generic error tail — the failures
+        that arrive there are the ones none of the specific recoveries
+        (resumption, ladder step-down, config drops) could absorb.
+        Three inside _FAILOVER_WINDOW_SECONDS and the session is
+        failing faster than reconnecting can fix; a lone transient
+        drop just ages out of the window."""
+        if getattr(self, "_failed_over", False):
+            return
+        if getattr(self, "_failover_dead", False):
+            return
+        if self._engine_caps is not None or self._engine_mode() != "gemini":
+            return     # the failure was the pipeline's, or a manual choice
+        now = time.monotonic()
+        times = [t for t in getattr(self, "_live_failure_times", [])
+                 if now - t < _FAILOVER_WINDOW_SECONDS]
+        times.append(now)
+        self._live_failure_times = times
+        if len(times) >= _FAILOVER_FAILURE_LIMIT:
+            reason = (f"{len(times)} Live session failures inside "
+                      f"{int(_FAILOVER_WINDOW_SECONDS)} seconds")
+            if self._maybe_failover(reason):
+                self._live_failure_times = []
+                self._conn_backoff = 0
+            else:
+                self._note_failover_unavailable()
+
+    def _deliver_failover_notice(self) -> None:
+        """Speak the failover notice — once, when a session is up and
+        she is awake to be heard. Called as each session comes up and
+        again on wake(), so a failover that lands while she sleeps is
+        announced when she wakes instead of being lost, or shouted
+        into an empty room. The label is cleared BEFORE speaking, so
+        no delivery error can ever make it repeat.
+
+        The words go through plugin_say, the announcement channel
+        everything else uses (the scheduler's timers speak the same
+        way): the engine phrases the sentence; the facts are fixed.
+        A pipeline engine starts with an empty history — it is a
+        fresh engine, exactly as a manual panel switch builds one —
+        so the notice says the conversation restarted, because it has."""
+        label = getattr(self, "_failover_notice", None)
+        if not label or not self.session or not self._awake:
+            return
+        self._failover_notice = None
+        self.plugin_say(
+            "Announce this to the user now, in one short sentence, in "
+            f"their own language: My Gemini connection is down, so I've "
+            f"switched to {label}. The conversation has restarted.")
+
     def _resolve_engine_caps(self):
         """What the chosen engine can do — or None for Gemini Live.
+
+        A latched failover (see _maybe_failover) counts as "pipeline"
+        here whatever the saved mode says: this method IS the manual
+        selection's construction path, and failover deliberately goes
+        through it unchanged rather than growing a second builder.
 
         Called BEFORE `_build_config()`, because the tool declarations depend on
         the answer. Building the providers here rather than later is deliberate:
@@ -2408,7 +2619,8 @@ class JarvisLive:
         the same ones the engine gets a moment later, and a misconfiguration is
         reported while there is still a Gemini session to fall back to.
         """
-        if self._engine_mode() != "pipeline":
+        forced = getattr(self, "_failed_over", False)
+        if self._engine_mode() != "pipeline" and not forced:
             return None
         try:
             from memory.config_manager import get_pipeline, get_provider_config
@@ -2595,6 +2807,30 @@ class JarvisLive:
                 # install this returns None in a few microseconds and nothing
                 # below behaves any differently.
                 self._engine_caps = self._resolve_engine_caps()
+                if getattr(self, "_failed_over", False) \
+                        and self._engine_caps is None:
+                    # Latched, but the pipeline would not build (the
+                    # reason is in _resolve_engine_caps' own log line).
+                    # Say so, write it down, and never try again this
+                    # run: the latch clears, _failover_dead remembers,
+                    # and Live's ordinary retries carry on below — the
+                    # assistant is exactly as well off as it was without
+                    # failover, and there is no second loop to flap in.
+                    self._failed_over     = False
+                    self._failover_dead   = True
+                    self._failover_notice = None
+                    print("[Engine] Failover target would not build — "
+                          "staying on Gemini Live.")
+                    self.ui.write_log(
+                        "SYS: The backup engine would not start — "
+                        "staying with Gemini.")
+                    try:
+                        from core import incidents
+                        incidents.record(
+                            "engine", "engine_failover_failed",
+                            "pipeline would not build at failover time")
+                    except Exception:
+                        pass
                 config = self._build_config()
 
                 # The conversation itself. `_open_session` gives back a Gemini
@@ -2653,6 +2889,13 @@ class JarvisLive:
                         self._awake = True
                         self.ui.set_state("LISTENING")
                         self.ui.write_log(f"SYS: {self._asst_name} online.")
+
+                    # A session is up: the outage episode (if any) is
+                    # over, and a failover notice still owed is spoken
+                    # now — it waits for _awake, and wake() retries
+                    # delivery for one that lands while she sleeps.
+                    self._failover_outage_noted = False
+                    self._deliver_failover_notice()
 
                     # What this machine will not permit, said once, on screen.
                     #
@@ -2753,15 +2996,31 @@ class JarvisLive:
                 # not start today": one model means one daily limit, and the
                 # limit always arrives mid-conversation.
                 if _gemini.note_live_failure(live_model, err_str):
+                    # Every rung resting at once is the ladder
+                    # exhausted — the failover trigger (Phase G2). It
+                    # is asked directly, via all_live_resting(), rather
+                    # than inferred from nxt == live_model below: the
+                    # two coincide (a just-resting rung is only handed
+                    # back by live_model() once all are resting), but
+                    # the trigger should say what it means.
+                    if _gemini.all_live_resting():
+                        if self._maybe_failover(
+                                "every Live model is out of quota or "
+                                "unavailable to this key"):
+                            self._conn_backoff = 0
+                            continue
+                        self.ui.write_log(
+                            "SYS: Every live model is rate-limited — "
+                            "retrying.")
+                        self._note_failover_unavailable()
+                        self._conn_backoff = 15
+                        await asyncio.sleep(self._conn_backoff)
+                        continue
                     nxt = _gemini.live_model()
                     self.ui.write_log(
                         f"SYS: Switching to {nxt.split('/')[-1]} — the previous "
-                        f"model is out of quota."
-                        if nxt != live_model else
-                        "SYS: Every live model is rate-limited — retrying.")
-                    self._conn_backoff = 0 if nxt != live_model else 15
-                    if nxt == live_model:
-                        await asyncio.sleep(self._conn_backoff)
+                        f"model is out of quota.")
+                    self._conn_backoff = 0
                     continue
 
                 # Turn-taking / media / thinking knobs rejected by the server
@@ -2819,6 +3078,11 @@ class JarvisLive:
                     )
                 else:
                     self._conn_backoff = 3
+
+                # Whatever shape the failure had, it reached the bottom
+                # of this handler unrecovered. Feed the failover window
+                # — a no-op unless it was a Live session that died.
+                self._note_live_failure()
             finally:
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
