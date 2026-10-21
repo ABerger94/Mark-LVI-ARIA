@@ -52,7 +52,7 @@ from google.genai import types
 from ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
-    save_session_summary, pop_last_session,
+    save_session_summary,
     search_memory, set_trim_notifier, forget_by_keyword,
 )
 
@@ -71,6 +71,7 @@ from actions.background_monitor import (
     add_monitor, remove_monitor, list_monitors, check_all as monitor_check_all,
 )
 from actions.web_search        import _news as _fetch_news_sync
+from actions                   import morning_briefing as _briefing
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
@@ -2086,12 +2087,33 @@ class JarvisLive:
 
     async def _send_startup_briefing(self) -> None:
         """
-        Two-phase briefing optimized for speed:
-          Phase 1 — instant greeting (no tools) → speech starts in <1s
-          Phase 2 — news pre-fetched in a background thread while Phase 1 plays,
-                    delivered as ready text (no Gemini tool-call round-trip) and
-                    shown on the UI content panel. Waits for turn_complete event
-                    instead of a fixed sleep so there is no unnecessary gap.
+        The greeting IS the briefing, composed in code — the model
+        presents it, it does not improvise it.
+
+        The composition is the morning_briefing tool's own
+        (actions/morning_briefing.compose_startup_briefing): a
+        time-aware salutation, today's and tomorrow's calendar, the
+        inbox's notable mail, the weather, and headlines for the
+        monitored topics — each section bounded, so a slow or dead
+        source degrades to an honest note in its section instead of
+        stalling or killing the greeting. The news list also goes
+        to the UI content panel, as it did before.
+
+        The composed text goes out as ONE [STARTUP_BRIEFING] turn
+        instructing her to present it in full and add nothing: the
+        opening is confined to the composed sections. What this
+        replaced was a two-phase freelance — phase 1 told the model
+        to "greet warmly, mention the time, and say you are
+        fetching today's news", plus a clause riffing on the last
+        session's summary — and the model filled the space with
+        plausible invention, including promoting a niece mentioned
+        in conversation into a definite plan for later that day.
+        Plans are asserted now only when the calendar or the inbox
+        actually carries them.
+
+        Engine-agnostic: this talks to self.session only, and both
+        engines (Gemini Live, the providers pipeline) implement the
+        same send_client_content session interface.
         """
         memory   = load_memory()
         identity = memory.get("identity", {})
@@ -2101,122 +2123,44 @@ class JarvisLive:
             return (e.get("value", "") if isinstance(e, dict) else str(e)).strip()
 
         lang = _val("language")
-        name = _val("name")
-        time_str = datetime.now().strftime("%H:%M")
-
-        # Start fetching news immediately — runs in parallel while phase 1 plays
-        loop = asyncio.get_event_loop()
-        news_future = loop.run_in_executor(None, _fetch_news_sync, "top world news today")
 
         await asyncio.sleep(0.3)
         if not self.session:
             return
 
-        # ── Phase 1: instant greeting ─────────────────────────────────────────
-        # The briefing fires before the user has said anything, so the
-        # remembered language is the only signal there is. It is a starting
-        # point, not a setting: the moment they reply, their language wins.
-        lang_clause = (f" Speak this greeting in {lang}, then follow the "
+        try:
+            topics = await asyncio.to_thread(list_monitors)
+        except Exception:
+            topics = []
+
+        text, panel = await _briefing.compose_startup_briefing(
+            topics=topics, news_fetch=_fetch_news_sync)
+
+        if panel:
+            try:
+                self.ui.show_content(panel[0], panel[1])
+            except Exception:
+                pass
+
+        lang_clause = (f" Speak this briefing in {lang}, then follow the "
                        f"user's own language from their first reply onward."
                        if lang else "")
-        name_clause = f" Address the user as {name}." if name else ""
 
-        # Inject last session context if available — pop removes it so it's never repeated
-        last = await asyncio.to_thread(pop_last_session)
-        session_clause = ""
-        if last:
-            try:
-                _delta = (datetime.now() - datetime.strptime(last["date"], "%Y-%m-%d")).days
-                _when  = "earlier today" if _delta == 0 else ("yesterday" if _delta == 1 else f"{_delta} days ago")
-            except Exception:
-                _when = "last time"
-            session_clause = (
-                f" Also briefly and naturally mention that {_when}: {last['summary']}"
-            )
-
-        p1 = (
-            f"Greet the user warmly, mention it is {time_str}, and say you are fetching today's news now.{session_clause} "
-            f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
+        p = (
+            "[STARTUP_BRIEFING] The briefing below was composed just now "
+            "from the calendar, the inbox, the weather and the news. "
+            "Present it as your greeting, in full, in your own natural "
+            "voice — every fact in it and no facts beyond it: add "
+            "nothing from memory or earlier conversation, and treat "
+            "nothing as a plan unless it is written here. Do not call "
+            f"any tools.{lang_clause}\n\n{text}"
         )
-
-        # Clear the turn-done event so we can wait for Phase 1 to finish
-        if self._turn_done_event:
-            self._turn_done_event.clear()
 
         await self.session.send_client_content(
-            turns={"role": "user", "parts": [{"text": p1}]},
+            turns={"role": "user", "parts": [{"text": p}]},
             turn_complete=True,
         )
-        print("[JARVIS] Briefing phase 1 (greeting) sent.")
-
-        # ── Phase 2: fire as soon as Phase 1 audio is done ───────────────────
-        async def _deliver_news():
-            try:
-                lang_str = (f" Speak in {lang} unless the user has since "
-                            f"spoken another language, in which case use theirs."
-                            if lang else "")
-
-                # Wait for news fetch (already running) and Phase 1 turn-complete
-                # in parallel — whichever takes longer determines the wait time
-                news_done   = asyncio.wrap_future(news_future)
-                turn_waited = False
-                if self._turn_done_event:
-                    try:
-                        await asyncio.wait_for(self._turn_done_event.wait(), timeout=6.0)
-                        turn_waited = True
-                    except asyncio.TimeoutError:
-                        pass
-
-                # Extra buffer: turn_complete fires when Gemini finishes *generating*
-                # Phase 1, but audio may still be playing.  Waiting a beat here
-                # prevents Phase 2 audio from arriving while Phase 1 is mid-sentence
-                # (which sounds like a "repeated first response" to the user).
-                if turn_waited:
-                    await asyncio.sleep(0.8)
-                else:
-                    await asyncio.sleep(1.0)
-
-                try:
-                    news_text = await asyncio.wait_for(news_done, timeout=8.0)
-                except Exception as e:
-                    self.ui.write_log(f"SYS: News fetch timed out/failed: {e!r}")
-                    news_text = ""
-
-                if not self.session:
-                    return
-
-                failed = (not news_text) or news_text.startswith(
-                    ("No news found", "Search failed", "Please provide")
-                )
-                if not failed:
-                    # Show on UI content panel immediately
-                    self.ui.show_content("NEWS — top world news today", news_text)
-
-                    p2 = (
-                        f"[BRIEFING] Here are today's top news headlines:\n{news_text}\n\n"
-                        "Pick ONE headline, summarise it in one sentence, then say the full list "
-                        f"is displayed on screen. Do not call any tools.{lang_str}"
-                    )
-                else:
-                    self.ui.write_log(
-                        f"SYS: News unavailable — backend returned: {news_text[:120]!r}"
-                    )
-                    p2 = (
-                        "News headlines could not be fetched right now. "
-                        f"Let the user know briefly.{lang_str}"
-                    )
-
-                await self.session.send_client_content(
-                    turns={"role": "user", "parts": [{"text": p2}]},
-                    turn_complete=True,
-                )
-                print("[JARVIS] Briefing phase 2 (news) sent.")
-            except Exception as e:
-                print(f"[Briefing] Phase 2 error: {e}")
-                print(f"[JARVIS] Briefing phase 2 failed: {e}")
-                self.ui.write_log("SYS: Could not fetch the news for the briefing.")
-
-        asyncio.create_task(_deliver_news())
+        print("[JARVIS] Startup briefing sent (composed in code).")
 
     # ── Session memory ──────────────────────────────────────────────────────────
 
