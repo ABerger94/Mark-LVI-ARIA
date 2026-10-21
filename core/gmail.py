@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import email as _email
 import imaplib
+import re
 import smtplib
 import time
 from email.message import EmailMessage
@@ -136,7 +137,7 @@ def list_summaries(query: str = "", limit: int = 10,
     """Newest matching messages as structured entries.
 
     Returns (entries, None) — entries are dicts with uid/date/from/
-    subject — or (None, outcome string) when Gmail is not connected or
+    subject/seen — or (None, outcome string) when Gmail is not connected or
     the read failed. This is the shared source for read_email,
     triage_email and the morning briefing, so the three can never
     disagree about what the inbox holds.
@@ -166,10 +167,15 @@ def list_summaries(query: str = "", limit: int = 10,
             uid = raw_uid.decode()
             typ, data = m.uid(
                 "FETCH", uid,
-                "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
+                "(FLAGS BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
             if typ != "OK" or not data or not data[0]:
                 continue
             raw = data[0][1] if isinstance(data[0], tuple) else data[0]
+            # The flags ride in the response's first element, beside
+            # the header bytes — b'101 (FLAGS (\\Seen) BODY[...])'.
+            # BODY.PEEK means listing never moves them, so the entry
+            # can carry read/unread honestly, from the same fetch.
+            flags = data[0][0] if isinstance(data[0], tuple) else b""
             h = _email.message_from_bytes(raw)
             entries.append({
                 "uid": uid,
@@ -177,8 +183,37 @@ def list_summaries(query: str = "", limit: int = 10,
                 "from": (h.get("From") or "?").replace("\n", " ")[:60],
                 "subject": (h.get("Subject") or "(no subject)")
                            .replace("\n", " ")[:80],
+                "seen": b"\\Seen" in (flags or b""),
             })
         return entries, None
+    except Exception as e:
+        return None, outcome.failed(action, f"could not read Gmail: {e}")
+    finally:
+        try:
+            m.logout()
+        except Exception:
+            pass
+
+
+def unread_count(action: str = "inbox_tab"):
+    """(count, None) or (None, outcome string): how many INBOX
+    messages the server counts as unseen — an IMAP STATUS query,
+    so no mailbox is selected and no flag can move. This is the
+    number the content panel's header shows on the Inbox tab;
+    callers treat an error as "unknown", never as zero."""
+    m, err = _open_imap(action)
+    if err:
+        return None, err
+    try:
+        typ, data = m.status("INBOX", "(UNSEEN)")
+        if typ != "OK" or not data or not data[0]:
+            return None, outcome.failed(action, "Gmail status failed")
+        raw = data[0].decode() if isinstance(data[0], bytes) \
+            else str(data[0])
+        match = re.search(r"UNSEEN\s+(\d+)", raw)
+        if not match:
+            return None, outcome.failed(action, "Gmail status failed")
+        return int(match.group(1)), None
     except Exception as e:
         return None, outcome.failed(action, f"could not read Gmail: {e}")
     finally:

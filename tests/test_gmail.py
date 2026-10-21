@@ -87,6 +87,8 @@ class FakeIMAP:
                             "Mon, 20 Oct 2026 11:00:00 -0400",
                             body="Are you coming on Sunday?"),
         }
+        self.flags = {"101": (), "102": ("\\Seen",), "103": ()}
+        self.unseen = 2
         FakeIMAP.instances.append(self)
 
     def login(self, user, pw):
@@ -107,9 +109,13 @@ class FakeIMAP:
             raw = self.messages[uid]
             if "HEADER.FIELDS" in spec:
                 head = raw.split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n"
-                return "OK", [(b"hdr", head)]
+                flags = " ".join(self.flags.get(uid, ()))
+                return "OK", [(f"{uid} (FLAGS ({flags}))".encode(), head)]
             return "OK", [(b"msg", raw)]
         raise AssertionError(f"unexpected uid command {command}")
+
+    def status(self, mailbox, names):
+        return "OK", [f"{mailbox} (UNSEEN {self.unseen})".encode()]
 
     def logout(self):
         return "BYE", [b"bye"]
@@ -214,6 +220,27 @@ def test_read_search_falls_back_to_text(connected, fake_servers):
     result = re_mod.read_email({"query": "from:boss newer_than:7d"})
     assert result.startswith("status=done"), result
     assert "Q3 report due" in result
+
+
+def test_summaries_carry_seen_flags(connected, fake_servers):
+    entries, err = gmail.list_summaries()
+    assert err is None
+    by_uid = {e["uid"]: e for e in entries}
+    assert by_uid["101"]["seen"] is False
+    assert by_uid["102"]["seen"] is True
+    assert by_uid["103"]["seen"] is False
+
+
+def test_unread_count_reads_status(connected, fake_servers):
+    count, err = gmail.unread_count()
+    assert err is None
+    assert count == 2
+
+
+def test_unread_count_not_connected_is_unknown_not_zero(cfg):
+    count, err = gmail.unread_count()
+    assert count is None
+    assert err.startswith("status=failed"), err
 
 
 def test_read_body_by_uid(connected, fake_servers):
