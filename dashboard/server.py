@@ -731,6 +731,36 @@ class DashboardServer:
             return True
 
     @staticmethod
+    def _assistant_name() -> str:
+        """The configured assistant name — these pages' brand.
+
+        Single source: memory.config_manager.get_assistant_name (the
+        config's 'assistant_name', default 'ARIA') — the same value the
+        HUD, the greeting and the prompt use, read on every serve so
+        renaming the assistant renames the phone pages with it. The
+        header brand was the last hard-coded 'Jarvis' standing after the
+        rename, because it lived in static markup that nothing
+        substituted into; __BRAND__ / __ASSISTANT_NAME__ are now
+        replaced exactly the way __IP__ / __PORT__ always were.
+        """
+        try:
+            from memory.config_manager import get_assistant_name
+            return get_assistant_name() or "ARIA"
+        except Exception:
+            return "ARIA"
+
+    @classmethod
+    def _brand_html(cls) -> str:
+        """The logo line, built from the configured name: first letter
+        accented, the rest plain, and the .logo CSS letterspaces the
+        whole string — the treatment the hard-coded brand had, wrapped
+        around whatever the name is now."""
+        import html as _html
+        raw = cls._assistant_name().strip().upper() or "ARIA"
+        return (f"<em>{_html.escape(raw[0])}</em>"
+                f"{_html.escape(raw[1:])}")
+
+    @staticmethod
     def _ssl_enabled() -> bool:
         """Is HTTPS actually in force? Wanted (see _https_wanted) AND a
         certificate pair exists to serve with.
@@ -856,7 +886,10 @@ class DashboardServer:
 
         @app.get("/login", response_class=HTMLResponse)
         async def login_page():
-            return HTMLResponse(self._login_html)
+            return HTMLResponse(
+                self._login_html
+                .replace("__BRAND__", self._brand_html())
+                .replace("__ASSISTANT_NAME__", self._assistant_name()))
 
         @app.get("/", response_class=HTMLResponse)
         async def index():
@@ -865,7 +898,9 @@ class DashboardServer:
             # don't send custom headers (location.href doesn't carry Authorization).
             html = (self._app_html
                     .replace("__IP__", self._ip)
-                    .replace("__PORT__", str(PORT)))
+                    .replace("__PORT__", str(PORT))
+                    .replace("__BRAND__", self._brand_html())
+                    .replace("__ASSISTANT_NAME__", self._assistant_name()))
             return HTMLResponse(html)
 
         @app.post("/login")

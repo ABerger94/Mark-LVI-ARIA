@@ -152,3 +152,70 @@ def test_https_explicit_on_still_needs_certs(tmp_path, monkeypatch):
                     config={"dashboard_https": True}, certs=False)
     assert cls._https_wanted() is True
     assert cls._ssl_enabled() is False
+
+
+# ── (c) the brand: the configured name, not a hard-coded one ────────────────
+#
+# The phone pages carried the last hard-coded brand in the tree: the
+# header logo in app.html and login.html was literal markup,
+# '<em>J</em>ARVIS', that Phase A's rename never reached because nothing
+# substituted into it. Both pages are now served with __BRAND__ /
+# __ASSISTANT_NAME__ replaced from memory.config_manager's
+# get_assistant_name — so these tests set a name nobody would hard-code
+# and read it back out of the served pages.
+
+def _serve(tmp_path, monkeypatch, config="absent"):
+    """A TestClient whose assistant name is whatever tmp_path says."""
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    import memory.config_manager as cm
+
+    if config == "absent":
+        cfg = tmp_path / "no-such-dir" / "api_keys.json"
+    else:
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        cfg = cfg_dir / "api_keys.json"
+        cfg.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(cm, "CONFIG_FILE", cfg)
+    return TestClient(_server().app)
+
+
+def _logo(page_html: str) -> str:
+    m = re.search(r'<div class="logo">(.*?)</div>', page_html)
+    assert m, "page carries no .logo brand"
+    return m.group(1)
+
+
+def test_app_page_brand_is_the_configured_name(tmp_path, monkeypatch):
+    client = _serve(tmp_path, monkeypatch, config={"assistant_name": "ZEPHYR"})
+    page = client.get("/")
+    assert page.status_code == 200
+    # The spaced-letter treatment comes from the .logo CSS; the markup is
+    # first letter accented, the rest plain — around the CONFIGURED name.
+    assert _logo(page.text) == "<em>Z</em>EPHYR"
+    assert "<em>J</em>ARVIS" not in page.text
+    # The only 'JARVIS' left in the served app page is the AES salt
+    # constant — an internal derivation string, not markup, and one
+    # Phase A deliberately left alone (changing it orphans every
+    # already-paired phone).
+    assert page.text.count("JARVIS") == page.text.count("JARVIS-DASHBOARD-v1")
+    assert "<title>ZEPHYR Dashboard</title>" in page.text
+    assert "Send a command to ZEPHYR" in page.text
+
+
+def test_login_page_brand_is_the_configured_name(tmp_path, monkeypatch):
+    client = _serve(tmp_path, monkeypatch, config={"assistant_name": "ZEPHYR"})
+    page = client.get("/login")
+    assert page.status_code == 200
+    assert _logo(page.text) == "<em>Z</em>EPHYR"
+    assert "<em>J</em>ARVIS" not in page.text
+    assert "JARVIS" not in page.text
+    assert "<title>ZEPHYR</title>" in page.text
+
+
+def test_dashboard_brand_defaults_to_aria(tmp_path, monkeypatch):
+    client = _serve(tmp_path, monkeypatch, config="absent")
+    assert _logo(client.get("/").text) == "<em>A</em>RIA"
+    assert _logo(client.get("/login").text) == "<em>A</em>RIA"
