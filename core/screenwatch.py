@@ -14,8 +14,9 @@ Wiring is ARIA's, translated: creating a watch creates a recurring
 in-app scheduler task of kind "screenwatch" whose prompt is the
 watch name; the scheduler tick advances the task and calls
 check_watch() here. The alert goes out through core/scheduler's
-bound speak hook — the one speech binding every background module
-shares.
+bound speech binding — the one every background module shares —
+via speak_alert() (Phase G4), so the proactive_alerts flag can
+mute the speech while the change is still recorded and logged.
 
 The vision ask is one injectable function (ask_screen) so tests
 drive checks with stubbed answers and no display.
@@ -135,9 +136,13 @@ def check_watch(name: str,
 
     if last is not None and answers_differ(last, answer):
         from core import scheduler
-        scheduler.speak(
-            f"Screen watch '{name}': the answer to '{question}' "
-            f"changed. Before: {str(last)[:150]} Now: {answer[:150]}")
+        line = (f"Screen watch '{name}': the answer to '{question}' "
+                f"changed. Before: {str(last)[:150]} "
+                f"Now: {answer[:150]}")
+        spoken = scheduler.speak_alert(line)
+        if not spoken and not scheduler.proactive_alerts_enabled():
+            return (f"Screen watch '{name}': change detected "
+                    f"(not spoken — proactive alerts are off).")
         return f"Screen watch '{name}': change detected."
     return f"Screen watch '{name}': no change."
 
