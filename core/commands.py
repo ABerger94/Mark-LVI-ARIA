@@ -82,6 +82,7 @@ EXAMPLE_PHRASES = {
     "unwatch_price":        "Stop watching that price",
     "set_timer":            "Set a 20-minute timer for the pasta",
     "set_recurring_task":   "Every hour, check whether the build finished",
+    "schedule_briefing":    "Brief me at 7:30 every morning",
     "list_scheduled_tasks": "What timers and tasks are running?",
     "cancel_scheduled_task":"Cancel that recurring task",
     "break_reminders":      "Turn break reminders on",
