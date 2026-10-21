@@ -16,7 +16,8 @@ ARIA used sqlite rows in her memory DB). Tasks:
 Kinds: once (speak the prompt), timer (speak "Timer done: …"),
 interval / brief (run the prompt as a turn), screenwatch and
 pricecheck (recurring passes owned by their own modules, created
-through add_task — the same wiring ARIA had).
+through add_task — the same wiring ARIA had), and briefing (Phase
+G4: a daily time-of-day task, below).
 
 FIRING — tick() is the whole loop body, driven by main.py's
 _run_scheduler task, which is created in the same session TaskGroup
@@ -31,6 +32,24 @@ report whether a session exists to speak into). An undelivered
 one-shot stays due and retries on the next tick: a reminder set
 before a reconnect is spoken late, never silently eaten. Recurring
 tasks advance from the moment they fire, as ARIA's did.
+
+PHASE G4 — THE PROACTIVE JOINS. Three connections, no new engines:
+  * kind "briefing": a daily briefing at a set time of day. The
+    record carries "time" ("07:30") and an "enabled" flag; when
+    due and enabled it fires through the bound briefing hook —
+    main.py composes the fixed-facts briefing (the startup
+    greeting's own composition) and delivers it as a spoken turn.
+    Undelivered (no session, or she is asleep) it stays due and
+    retries, the store's ordinary discipline — which is also the
+    whole catch-up story: a briefing whose time passed while she
+    was off fires ONCE at the next awake session, then advances
+    to the next day. Disabled, it advances silently.
+  * Price crossings and screen-watch changes speak through
+    speak_alert(), gated by config's proactive_alerts flag: off
+    means the passes still run and the hits are logged, just not
+    said aloud. A scheduled briefing is never gated by it.
+  * A screen-watch change is logged here whether spoken or not,
+    so a hit never exists only in a voice nobody heard.
 
 TWO DIFFERENCES FROM ARIA, both deliberate:
   * Her timers were threading.Timer — in-memory, gone on restart.
@@ -47,7 +66,7 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -101,15 +120,18 @@ def _save(data: dict) -> None:
 
 _say_hook: Optional[Callable[[str], bool]] = None
 _run_hook: Optional[Callable[[str], bool]] = None
+_briefing_hook: Optional[Callable[[], bool]] = None
 
 
-def bind(say=None, run_prompt=None) -> None:
+def bind(say=None, run_prompt=None, briefing=None) -> None:
     """Wire the firing hooks to the live session. say(text) announces
-    an exact line; run_prompt(text) injects a prompt as a turn. Both
-    return whether the line actually went out."""
-    global _say_hook, _run_hook
+    an exact line; run_prompt(text) injects a prompt as a turn;
+    briefing() delivers the composed daily briefing. All return
+    whether the delivery actually went out."""
+    global _say_hook, _run_hook, _briefing_hook
     _say_hook = say
     _run_hook = run_prompt
+    _briefing_hook = briefing
 
 
 def speak(text: str) -> bool:
@@ -131,6 +153,37 @@ def _run_prompt(text: str) -> bool:
         return False
     try:
         result = _run_hook(text)
+    except Exception:
+        return False
+    return True if result is None else bool(result)
+
+
+def proactive_alerts_enabled() -> bool:
+    """Config's proactive_alerts flag, read at alert time (Phase
+    G4). An unreadable config defaults to ON — the flag silences
+    her on purpose, never by accident."""
+    try:
+        from memory.config_manager import get_proactive_alerts
+        return bool(get_proactive_alerts())
+    except Exception:
+        return True
+
+
+def speak_alert(text: str) -> bool:
+    """Speak a proactive watch alert (a price crossing, a screen
+    change) — speak()'s flag-gated sibling. False when alerts are
+    muted as well as when nothing could take the line, so the
+    caller can log what was not said."""
+    if not proactive_alerts_enabled():
+        return False
+    return speak(text)
+
+
+def _call_briefing() -> bool:
+    if _briefing_hook is None:
+        return False
+    try:
+        result = _briefing_hook()
     except Exception:
         return False
     return True if result is None else bool(result)
@@ -219,6 +272,119 @@ def set_recurring(interval_seconds: int, prompt: str,
     return tid, kind
 
 
+# ── The daily briefing task (Phase G4) ───────────────────────────────────────
+
+_DAILY_TIME_RE = re.compile(
+    r"^\s*(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?\s*$", re.IGNORECASE)
+
+
+def parse_daily_time(text) -> Optional[tuple[int, int]]:
+    """'7:30', '07:30', '7:30 AM', '7 PM', '19:30' → (hour, minute)
+    in 24-hour form, or None. With a meridiem the hour is 1–12 and
+    a missing minute part means on the hour; without one the hour
+    is read as 24-hour time."""
+    m = _DAILY_TIME_RE.match(str(text or ""))
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    meridiem = (m.group(3) or "").lower()
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+    elif hour > 23:
+        return None
+    return hour, minute
+
+
+def _fmt_daily_time(hour: int, minute: int) -> str:
+    suffix = "PM" if hour >= 12 else "AM"
+    return f"{hour % 12 or 12}:{minute:02d} {suffix}"
+
+
+def _next_daily(now: float, hour: int, minute: int) -> float:
+    """The next local occurrence of hour:minute strictly after
+    `now` — wall-clock, so a 7:30 briefing stays a 7:30 briefing
+    across a daylight-saving shift."""
+    cand = datetime.fromtimestamp(now).replace(
+        hour=hour, minute=minute, second=0, microsecond=0)
+    if cand.timestamp() <= now:
+        cand += timedelta(days=1)
+    return cand.timestamp()
+
+
+def _briefing_prompt(task: dict) -> str:
+    parsed = parse_daily_time(task.get("time") or "")
+    label = (_fmt_daily_time(*parsed) if parsed
+             else (task.get("time") or "?"))
+    base = f"Daily briefing at {label}"
+    return base if task.get("enabled", True) else base + " (disabled)"
+
+
+def get_briefing_task() -> Optional[dict]:
+    """The daily-briefing task record, or None. There is at most
+    one: setting it again moves the time rather than stacking."""
+    with _lock:
+        for t in _load()["tasks"]:
+            if t.get("kind") == "briefing":
+                return dict(t)
+    return None
+
+
+def set_daily_briefing(time_text: str, enabled: bool = True,
+                       now: Optional[float] = None
+                       ) -> tuple[Optional[int], Optional[str]]:
+    """Create or move the daily briefing. Returns (task id,
+    normalised "HH:MM"), or (None, None) when the time won't
+    parse. next_run is the next occurrence of the time of day."""
+    parsed = parse_daily_time(time_text)
+    if parsed is None:
+        return None, None
+    hour, minute = parsed
+    now = time.time() if now is None else now
+    time_str = f"{hour:02d}:{minute:02d}"
+    with _lock:
+        data = _load()
+        task = next((t for t in data["tasks"]
+                     if t.get("kind") == "briefing"), None)
+        if task is None:
+            task = {"id": data["next_id"], "kind": "briefing",
+                    "prompt": "", "interval_s": 86400, "created": now}
+            data["next_id"] += 1
+            data["tasks"].append(task)
+        task["time"] = time_str
+        task["enabled"] = bool(enabled)
+        task["next_run"] = _next_daily(now, hour, minute)
+        task["prompt"] = _briefing_prompt(task)
+        _save(data)
+        return task["id"], time_str
+
+
+def set_briefing_enabled(enabled: bool,
+                          now: Optional[float] = None) -> bool:
+    """Flip the briefing task's enabled flag (and re-arm its next
+    run from now, so a re-enabled briefing never fires for a time
+    that passed while it was off). False when no briefing exists."""
+    now = time.time() if now is None else now
+    with _lock:
+        data = _load()
+        task = next((t for t in data["tasks"]
+                     if t.get("kind") == "briefing"), None)
+        if task is None:
+            return False
+        task["enabled"] = bool(enabled)
+        parsed = parse_daily_time(task.get("time") or "")
+        if parsed is not None:
+            task["next_run"] = _next_daily(now, *parsed)
+        task["prompt"] = _briefing_prompt(task)
+        _save(data)
+        return True
+
+
 def _fmt_next(epoch: float) -> str:
     try:
         return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
@@ -303,7 +469,9 @@ def tick(now: Optional[float] = None) -> list[str]:
                 changed = True
                 try:
                     from core import screenwatch
-                    screenwatch.check_watch(prompt)
+                    result = screenwatch.check_watch(prompt)
+                    if "change detected" in (result or ""):
+                        logs.append(f"screenwatch #{tid}: {result}")
                 except Exception as e:
                     logs.append(f"screenwatch #{tid} check failed: {e}")
             elif kind == "pricecheck":
@@ -311,11 +479,40 @@ def tick(now: Optional[float] = None) -> list[str]:
                 changed = True
                 try:
                     from core import pricecheck
-                    _summary, alerts = pricecheck.check_watches()
-                    for alert in alerts:
-                        speak(alert)
+                    hits: list = []
+                    _summary, alerts = pricecheck.check_watches(
+                        hits=hits)
+                    if proactive_alerts_enabled():
+                        for hit in hits:
+                            if not speak(pricecheck.spoken_alert(hit)):
+                                logs.append(
+                                    f"pricecheck #{tid}: alert "
+                                    f"undelivered: {hit['label']}")
+                    else:
+                        for alert in alerts:
+                            logs.append(
+                                f"pricecheck #{tid}: alert not spoken "
+                                f"(proactive alerts off): {alert}")
                 except Exception as e:
                     logs.append(f"pricecheck #{tid} failed: {e}")
+            elif kind == "briefing":
+                parsed = parse_daily_time(task.get("time") or "")
+                if parsed is None:
+                    task["next_run"] = now + 3600
+                    changed = True
+                    logs.append(f"briefing #{tid}: unusable time "
+                                f"{task.get('time')!r} — rescheduled +1h")
+                elif not task.get("enabled", True):
+                    task["next_run"] = _next_daily(now, *parsed)
+                    changed = True
+                    logs.append(f"briefing #{tid} disabled — skipped")
+                elif _call_briefing():
+                    task["next_run"] = _next_daily(now, *parsed)
+                    changed = True
+                    logs.append(f"briefing #{tid} fired")
+                else:
+                    logs.append(f"briefing #{tid} due but undelivered "
+                                f"— will retry")
             else:
                 # An unknown kind must not re-fire every tick forever:
                 # push it an hour out and say so once per firing.
