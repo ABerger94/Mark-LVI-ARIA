@@ -72,6 +72,19 @@ def test_ui_name_defaults():
         ui.HudCanvas.__init__).parameters["assistant_name"].default == "A.R.I.A"
 
 
+def test_speak_error_has_no_butler_register():
+    """Phase B3: speak_error was the last 'Sir, …' in the codebase — the
+    spoken form A1's address principle (by name or plain second person, no
+    honorifics) had not reached, because it lives in a code path rather
+    than the prompt."""
+    import inspect
+
+    import main
+
+    src = inspect.getsource(main.JarvisLive.speak_error)
+    assert "Sir" not in src
+
+
 def test_dashboard_pages_name_aria():
     login = (ROOT / "dashboard" / "static" / "login.html").read_text(encoding="utf-8")
     app = (ROOT / "dashboard" / "static" / "app.html").read_text(encoding="utf-8")
