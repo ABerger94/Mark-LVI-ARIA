@@ -52,7 +52,7 @@ from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSlider,
+    QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSlider,
 )
 
 try:
@@ -1043,6 +1043,185 @@ class SpotifyPanel(QWidget):
         else:
             self._track_lbl.setText("Not playing")
             self._artist_lbl.setText("")
+
+
+class ContentTabs(QWidget):
+    """
+    The content panel's tabbed body: News | Inbox | Calendar.
+
+    News is the panel's original display — pushed by show_content()
+    (the startup briefing's list, web-search results) and by the
+    document-review renderer, both of which write into
+    news_display exactly as they wrote into the lone QTextEdit
+    that lived here before tabs. Inbox and Calendar are pulled:
+    each is composed off-thread by a provider callable (bound by
+    JarvisLive to core/panel_data, which reads the same Gmail /
+    iCal sources the tools speak from) the first time its tab is
+    shown, and again when its Refresh button is pressed. Nothing
+    fetches before a data tab is first shown, and the fetch never
+    runs on the Qt thread — the tab shows "Loading\u2026" and the
+    finished text arrives by signal.
+    """
+
+    _data_sig = pyqtSignal(str, str)   # (which, text) — fetch result, any thread
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._providers = {"inbox": None, "calendar": None}
+        self._loaded    = {"inbox": False, "calendar": False}
+        self._loading   = set()
+        self._data_sig.connect(self._on_data)
+
+        self.tabs = QTabWidget()
+        self.tabs.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self.tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: none; background: transparent; }}
+            QTabBar::tab {{
+                background: {C.DARK}; color: {C.TEXT_DIM};
+                border: 1px solid {C.BORDER}; border-bottom: none;
+                padding: 3px 14px; margin-right: 2px;
+            }}
+            QTabBar::tab:selected {{ background: {C.PANEL}; color: {C.PRI}; }}
+            QTabBar::tab:hover {{ color: {C.TEXT}; }}
+        """)
+
+        self.news_display = self._text_edit()
+        self.tabs.addTab(self.news_display, "News")
+
+        self._displays = {}
+        self._refresh_btns = {}
+        for which, label in (("inbox", "Inbox"), ("calendar", "Calendar")):
+            page, disp, btn = self._data_page(which)
+            self._displays[which] = disp
+            self._refresh_btns[which] = btn
+            self.tabs.addTab(page, label)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.tabs)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+    # ── construction helpers ─────────────────────────────────────────
+    @staticmethod
+    def _text_edit() -> QTextEdit:
+        """The panel's reading surface — the exact widget and style
+        the lone content display had, so News reads unchanged and
+        the data tabs are native to the same panel."""
+        ed = QTextEdit()
+        ed.setReadOnly(True)
+        ed.setFont(QFont("Courier New", 8))
+        ed.setMinimumHeight(60)
+        ed.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        ed.setStyleSheet(f"""
+            QTextEdit {{
+                background: {C.DARK};
+                color: {C.TEXT};
+                border: 1px solid {C.BORDER};
+                border-radius: 3px;
+                padding: 6px 8px;
+                selection-background-color: {C.PRI_GHO};
+            }}
+            QScrollBar:vertical {{
+                background: {C.BG}; width: 6px; border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {C.BORDER_B}; border-radius: 3px; min-height: 16px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0; border: none;
+            }}
+        """)
+        return ed
+
+    def _data_page(self, which: str):
+        """One pulled-data tab: a Refresh row over a reading surface."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 4, 0, 0)
+        lay.setSpacing(4)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        btn = QPushButton("REFRESH  \u21bb")
+        btn.setFont(QFont("Courier New", 7))
+        btn.setFixedHeight(18)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_DIM};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 0 5px;
+            }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+            QPushButton:disabled {{ color: {C.BORDER_B}; }}
+        """)
+        btn.clicked.connect(lambda _=False, w=which: self.refresh(w))
+        row.addWidget(btn)
+        lay.addLayout(row)
+
+        disp = self._text_edit()
+        lay.addWidget(disp)
+        return page, disp, btn
+
+    # ── public surface (MainWindow / JarvisLive) ─────────────────────
+    def set_providers(self, inbox=None, calendar=None):
+        """Bind the pull sources for the data tabs (callables
+        returning finished text; they block, so they are only ever
+        invoked on a worker thread)."""
+        if inbox is not None:
+            self._providers["inbox"] = inbox
+        if calendar is not None:
+            self._providers["calendar"] = calendar
+
+    def show_news(self):
+        """Bring the News tab forward — pushed content (a briefing,
+        search results, a review) is what the user was just told to
+        look at, whichever tab they left selected."""
+        self.tabs.setCurrentIndex(0)
+
+    def refresh(self, which: str):
+        """Re-fetch a data tab now (its Refresh button)."""
+        self._start_fetch(which)
+
+    # ── fetching ─────────────────────────────────────────────────────
+    def _on_tab_changed(self, index: int):
+        which = {1: "inbox", 2: "calendar"}.get(index)
+        if which and not self._loaded[which]:
+            self._start_fetch(which)
+
+    def _start_fetch(self, which: str):
+        if which in self._loading:
+            return
+        provider = self._providers.get(which)
+        disp = self._displays[which]
+        if provider is None:
+            disp.setPlainText("This tab isn't available in this build.")
+            self._loaded[which] = True
+            return
+        self._loading.add(which)
+        self._refresh_btns[which].setEnabled(False)
+        disp.setPlainText("Loading\u2026")
+
+        def work():
+            try:
+                text = provider()
+            except Exception as e:
+                text = f"Couldn't load this tab just now.\n\n{e}"
+            self._data_sig.emit(which, str(text))
+
+        threading.Thread(target=work, daemon=True,
+                         name=f"content-tab-{which}").start()
+
+    def _on_data(self, which: str, text: str):
+        """Slot — Qt main thread. Land a finished fetch."""
+        self._loading.discard(which)
+        self._loaded[which] = True
+        disp = self._displays[which]
+        disp.setPlainText(text)
+        disp.moveCursor(disp.textCursor().MoveOperation.Start)
+        self._refresh_btns[which].setEnabled(True)
+
 
 class LogWidget(QTextEdit):
     _sig = pyqtSignal(str)
@@ -6014,34 +6193,15 @@ class MainWindow(QMainWindow):
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER};"); lay.addWidget(sep)
 
-        # ── text display ──────────────────────────────────────────────────────
-        self._content_display = QTextEdit()
-        self._content_display.setReadOnly(True)
-        self._content_display.setFont(QFont("Courier New", 8))
-        self._content_display.setMinimumHeight(60)
-        self._content_display.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        self._content_display.setStyleSheet(f"""
-            QTextEdit {{
-                background: {C.DARK};
-                color: {C.TEXT};
-                border: 1px solid {C.BORDER};
-                border-radius: 3px;
-                padding: 6px 8px;
-                selection-background-color: {C.PRI_GHO};
-            }}
-            QScrollBar:vertical {{
-                background: {C.BG}; width: 6px; border: none;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {C.BORDER_B}; border-radius: 3px; min-height: 16px;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0; border: none;
-            }}
-        """)
-        lay.addWidget(self._content_display)
+        # ── tabbed display ────────────────────────────────────────────────────
+        # News | Inbox | Calendar. News is the original display —
+        # _content_display keeps pointing at it, so show_content()
+        # and the review renderer write exactly where they always
+        # did; Inbox and Calendar pull their data (core/panel_data)
+        # the first time they are shown.
+        self._content_tabs_view = ContentTabs()
+        self._content_display = self._content_tabs_view.news_display
+        lay.addWidget(self._content_tabs_view)
 
         return w
 
@@ -6057,11 +6217,19 @@ class MainWindow(QMainWindow):
         self._content_display.moveCursor(
             self._content_display.textCursor().MoveOperation.Start
         )
+        self._content_tabs_view.show_news()
         first_show = not self._content_panel.isVisible()
         self._content_panel.show()
         if first_show:
             total = self._center_split.height()
             self._center_split.setSizes([max(total - 220, 120), 220])
+
+
+    def set_content_tab_providers(self, inbox=None, calendar=None):
+        """Bind the content panel's Inbox/Calendar pull sources
+        (JarvisLive wires core/panel_data here at startup)."""
+        self._content_tabs_view.set_providers(inbox=inbox,
+                                              calendar=calendar)
 
     # ── document review ──────────────────────────────────────────────────────
     # Rendered as rich text into the content panel that already exists, rather
@@ -6142,6 +6310,7 @@ class MainWindow(QMainWindow):
         self._content_display.setHtml("".join(parts))
         self._content_display.moveCursor(
             self._content_display.textCursor().MoveOperation.Start)
+        self._content_tabs_view.show_news()
         first_show = not self._content_panel.isVisible()
         self._content_panel.show()
         if first_show:
@@ -7355,6 +7524,13 @@ class JarvisUI:
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
+
+    def set_content_tab_providers(self, inbox_fetcher=None,
+                                  calendar_fetcher=None):
+        """Bind the content panel's Inbox/Calendar data providers
+        (core/panel_data fetchers — composed off the Qt thread)."""
+        self._win.set_content_tab_providers(
+            inbox=inbox_fetcher, calendar=calendar_fetcher)
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.
