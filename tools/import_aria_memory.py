@@ -11,10 +11,11 @@ into this tree's memory/long_term.json (blueprint D1).
 WHERE ARIA KEPT IT
     A SQLite database, aria_memory.db in her workspace directory, one
     table: memory(id, category, key, value, updated_at, embedding).
-    The embedding column is hers alone (semantic recall) and is not
-    carried: this store's recall is lexical by design (memory/
-    memory_manager.search_memory), so the vectors would be dead
-    weight in a JSON file. A JSON export is also accepted — a list of
+    The embedding column is hers alone and is not carried: this
+    store builds its OWN vectors (Phase G1 — memory/embeddings.py,
+    keyed by a hash of each value), so imported facts are embedded
+    by the normal refresh path on arrival and her vectors, in her
+    model's space, would be dead weight here. A JSON export is also accepted — a list of
     {"category", "key", "value"} objects, or {category: {key: value}} —
     for copies of her store that were exported rather than lifted as
     the .db itself.

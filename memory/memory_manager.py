@@ -556,16 +556,42 @@ def search_memory(query: str, limit: int = 8) -> str:
             if s > 0:
                 rows.append((s, cat, key, val))
 
-    if not rows:
+    limit = max(1, limit)
+    rows.sort(key=lambda r: (-r[0], r[2]))
+    lines = [f"{cat}/{_pretty(key)}: {val}"
+             for _s, cat, key, val in rows[:limit]]
+    total = len(rows)
+
+    # The semantic leg (Phase G1): facts whose MEANING matches, found
+    # by embedding similarity rather than shared words, labelled as
+    # similar matches and ranked after the keyword hits — a shared
+    # word is evidence, a shared direction is a suggestion. Consulted
+    # even when the keyword leg found nothing (that is the case it
+    # exists for), and degrading to nothing, by design, whenever
+    # embeddings are unavailable: keyword recall never depends on a
+    # network.
+    if words and len(lines) < limit:
+        seen = {(cat, key) for _s, cat, key, _v in rows}
+        emb = _embeddings_module()
+        if emb is not None:
+            for _sim, cat, key, val in emb.semantic_matches(
+                    query, memory, limit=limit):
+                if (cat, key) in seen:
+                    continue
+                seen.add((cat, key))
+                lines.append(f"{cat}/{_pretty(key)}: {val} [similar match]")
+                total += 1
+                if len(lines) >= limit:
+                    break
+
+    if not lines:
         return (f"Nothing stored about '{query}'." if query
                 else "I have not stored anything about this person yet.")
 
-    rows.sort(key=lambda r: (-r[0], r[2]))
-    lines = [f"{cat}/{_pretty(key)}: {val}" for _s, cat, key, val in rows[:max(1, limit)]]
     head  = (f"Stored facts matching '{query}':" if query
              else "Everything currently stored:")
-    more  = (f"\n(+{len(rows) - len(lines)} more — search with a narrower keyword)"
-             if len(rows) > len(lines) else "")
+    more  = (f"\n(+{total - len(lines)} more — search with a narrower keyword)"
+             if total > len(lines) else "")
     return head + "\n" + "\n".join(lines) + more
 
 

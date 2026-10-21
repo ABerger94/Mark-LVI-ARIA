@@ -2519,6 +2519,17 @@ class JarvisLive:
         )
         set_trim_notifier(self.ui.write_log)
 
+        # Semantic-recall backfill (Phase G1): queue embeddings for
+        # any stored facts lacking a fresh vector. Fire-and-forget —
+        # a daemon worker drains the queue off the session path, and
+        # recall is lexical until vectors land (permanently, if the
+        # embedding API never answers; that is the designed floor).
+        try:
+            from memory import embeddings as _memory_embeddings
+            _memory_embeddings.kick_backfill()
+        except Exception:
+            pass
+
         # Routines (Phase F1) replay through the same funnel live calls
         # use, bound here with the other shared services: the executor
         # routes each step back through _execute_tool, and pre-flight
