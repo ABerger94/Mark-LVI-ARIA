@@ -38,4 +38,4 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           python -m pytest tests/test_identity.py tests/test_incidents.py -q
-          for f in tests/test_providers_selftest.py tests/test_dashboard.py tests/test_commands.py tests/test_spotify.py tests/test_files.py tests/test_selfedit.py tests/test_memory_import.py tests/test_routines.py tests/test_gmail.py tests/test_calendar.py tests/test_github.py tests/test_provider_setup.py tests/test_briefing.py; do python -m pytest "$f" -q || exit 1; done
+          for f in tests/test_providers_selftest.py tests/test_dashboard.py tests/test_commands.py tests/test_spotify.py tests/test_files.py tests/test_selfedit.py tests/test_memory_import.py tests/test_routines.py tests/test_gmail.py tests/test_calendar.py tests/test_github.py tests/test_provider_setup.py tests/test_briefing.py tests/test_file_tools.py tests/test_journal.py tests/test_mtg.py tests/test_price_watches.py tests/test_scheduler.py tests/test_screen_watches.py tests/test_dj.py; do python -m pytest "$f" -q || exit 1; done
