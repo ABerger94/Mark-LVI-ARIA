@@ -90,6 +90,7 @@ EXAMPLE_PHRASES = {
     "list_screen_watches":  "What are you watching on my screen?",
     "dj":                   "Play my coding playlist",
     "save_playlist":        "Save this as my coding playlist",
+    "run_diagnostics":      "Run diagnostics — is everything working?",
 }
 
 _SOURCE_ORDER = ("Built-in", "Action", "Plugin")
