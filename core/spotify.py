@@ -214,6 +214,74 @@ def launch_spotify() -> bool:
         return False
 
 
+# ── URI playback + shuffle (the DJ's hands) ─────────────────────────────────
+
+def open_uri(uri: str) -> bool:
+    """Open a spotify: URI (a playlist, the Liked Songs collection,
+    a search) in the app — ARIA's os.startfile path on Windows,
+    the platform opener elsewhere. True when the open was issued."""
+    try:
+        if _OS == "Windows":
+            import os
+            os.startfile(uri)
+            return True
+        import subprocess
+        if _OS == "Darwin":
+            subprocess.Popen(["open", uri])
+        else:
+            subprocess.Popen(["xdg-open", uri])
+        return True
+    except Exception:
+        return False
+
+
+def focus_spotify() -> bool:
+    """Bring Spotify's window to the front (Windows). The shuffle
+    key is a chord Spotify only hears while it is focused — sending
+    Ctrl+S to whatever happens to be focused instead would be a
+    Save in somebody else's app, so DJ mode never sends it blind."""
+    if _OS != "Windows":
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        found: list[int] = []
+
+        def _cb(hwnd, _extra):
+            if user32.IsWindowVisible(hwnd) and _is_spotify_window(hwnd, user32):
+                found.append(hwnd)
+                return False
+            return True
+
+        proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+        user32.EnumWindows(proc(_cb), 0)
+        if not found:
+            return False
+        user32.SetForegroundWindow(found[0])
+        return True
+    except Exception:
+        return False
+
+
+def tap_shuffle_key() -> bool:
+    """Toggle Spotify's shuffle with Ctrl+S (ARIA's _tap_ctrl_s),
+    focus first. False when Spotify could not be focused — the
+    chord is then never sent."""
+    if _OS != "Windows" or not focus_spotify():
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        time.sleep(0.15)
+        user32.keybd_event(0x11, 0, 0, 0)   # Ctrl down
+        user32.keybd_event(0x53, 0, 0, 0)   # S down
+        user32.keybd_event(0x53, 0, 2, 0)   # S up
+        user32.keybd_event(0x11, 0, 2, 0)   # Ctrl up
+        return True
+    except Exception:
+        return False
+
+
 # ── Per-app volume (Windows, pycaw in-process) ───────────────────────────────
 
 def _spotify_volume_iface():
