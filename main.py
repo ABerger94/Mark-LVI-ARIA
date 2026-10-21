@@ -659,6 +659,10 @@ class JarvisLive:
         self._failover_notice: str | None = None
         self._failover_outage_noted = False
         self._live_failure_times: list[float] = []
+        # Announcements queued while she slept (Phase G4): the
+        # scheduler's say hook parks lines here instead of speaking
+        # them into an empty room; wake() speaks the queue, once.
+        self._pending_announce: list[str] = []
         # Self-edit watcher (Phase D — ARIA's P4 loop, core/selfedit.py).
         # It snapshots her own source tree NOW, at boot; after every
         # completed turn the receive loop asks it to check (see
@@ -902,6 +906,7 @@ class JarvisLive:
             self.ui.set_state("LISTENING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
         self._deliver_failover_notice()
+        self._flush_pending_announce()
 
     def sleep(self, reason: str = "timeout") -> None:
         if not self._awake:
@@ -2199,6 +2204,12 @@ class JarvisLive:
         Plans are asserted now only when the calendar or the inbox
         actually carries them.
 
+        Callers: the run loop at launch (once, gated on
+        get_brief_enabled) and the scheduler's daily briefing task,
+        via _scheduler_briefing (Phase G4) — one delivery path, so
+        a scheduled briefing is composed and confined exactly like
+        the greeting.
+
         Engine-agnostic: this talks to self.session only, and both
         engines (Gemini Live, the providers pipeline) implement the
         same send_client_content session interface.
@@ -2383,9 +2394,26 @@ class JarvisLive:
         (a timer finishing, a reminder, a watch alert). Returns False
         when there is no session to speak into, so the scheduler
         keeps the task due and retries on a later tick rather than
-        consuming it silently."""
+        consuming it silently.
+
+        Awake-gated (Phase G4) — the failover notice's discipline,
+        generalised to every scheduler announcement: while she
+        sleeps (wake-word mode) the line is QUEUED rather than
+        spoken into an empty room or dropped, and wake() announces
+        the queue. Accepting a line for the queue returns True: the
+        hook's background consumers (the price and screen passes)
+        mark their events as they go, so answering False would lose
+        the alert outright. Every announcement, spoken now or
+        queued for later, also lands in the SYS log."""
         if not self.session:
             return False
+        try:
+            self.ui.write_log(f"SYS: {text}")
+        except Exception:
+            pass
+        if not self._awake:
+            self._pending_announce.append(text)
+            return True
         self.plugin_say(
             "Announce this to the user now, in one short sentence, "
             "in their own language: " + text)
@@ -2397,6 +2425,32 @@ class JarvisLive:
         if not self.session:
             return False
         self.plugin_say(prompt)
+        return True
+
+    def _scheduler_briefing(self) -> bool:
+        """Delivery hook for the scheduler's daily briefing task
+        (Phase G4): the composed briefing, delivered as a spoken
+        turn through _send_startup_briefing — the startup
+        greeting's own composition and delivery path, called
+        directly, so the two can never diverge. Returns False when
+        there is no session or she is
+        asleep: the task stays due and retries on a later tick, so
+        a scheduled briefing is never spoken into a sleeping room
+        and never silently eaten either. Past acceptance it is
+        fire-and-forget, exactly the say hook's honesty level — the
+        composition's sections degrade individually rather than
+        the delivery failing as a whole."""
+        if not self.session or not self._awake:
+            return False
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            return False
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_startup_briefing(), loop)
+        except Exception as e:
+            print(f"[Scheduler] ⚠️ briefing delivery failed: {e}")
+            return False
         return True
 
     async def _run_scheduler(self) -> None:
@@ -2647,6 +2701,22 @@ class JarvisLive:
             f"their own language: My Gemini connection is down, so I've "
             f"switched to {label}. The conversation has restarted.")
 
+    def _flush_pending_announce(self) -> None:
+        """Speak the announcements the scheduler queued while she
+        slept — once each, in the order they arrived. The queue is
+        swapped out BEFORE speaking, the failover notice's
+        discipline, so no delivery error can ever repeat one.
+        Called from wake() and as each session comes up (a queue
+        can outlive the session under which it accumulated)."""
+        queue = getattr(self, "_pending_announce", None)
+        if not queue or not self.session or not self._awake:
+            return
+        self._pending_announce = []
+        for text in queue:
+            self.plugin_say(
+                "Announce this to the user now, in one short "
+                "sentence, in their own language: " + text)
+
     def _resolve_engine_caps(self):
         """What the chosen engine can do — or None for Gemini Live.
 
@@ -2798,7 +2868,8 @@ class JarvisLive:
         # session is up stays due and retries instead of being
         # eaten. Bound here with the other shared services.
         scheduler_core.bind(say=self._scheduler_say,
-                            run_prompt=self._scheduler_run)
+                            run_prompt=self._scheduler_run,
+                            briefing=self._scheduler_briefing)
 
         # Content panel tabs (UI TABS): the Inbox and Calendar tabs
         # pull from the same Gmail / iCal sources the tools speak
@@ -2938,6 +3009,7 @@ class JarvisLive:
                     # delivery for one that lands while she sleeps.
                     self._failover_outage_noted = False
                     self._deliver_failover_notice()
+                    self._flush_pending_announce()
 
                     # What this machine will not permit, said once, on screen.
                     #
