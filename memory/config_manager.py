@@ -426,6 +426,26 @@ def save_engine_auto_failover(enabled: bool) -> None:
     write_config(data)
 
 
+# ── Proactive alerts ───────────────────────────────────────────────────
+# Whether watch hits she discovers on her own — a price crossing its
+# target, a screen watch's answer changing — are SPOKEN when they
+# happen (Phase G4). On unless explicitly switched off: anything but
+# an explicit false means on (the engine_auto_failover idiom). The
+# flag gates speech only: the passes still run, the hits are still
+# recorded and logged — she just doesn't say them out loud. A briefing
+# Alek explicitly scheduled is never gated by this; he asked for it
+# by name.
+
+def get_proactive_alerts() -> bool:
+    return bool(load_api_keys().get("proactive_alerts", True))
+
+
+def save_proactive_alerts(enabled: bool) -> None:
+    data = load_api_keys()
+    data["proactive_alerts"] = bool(enabled)
+    write_config(data)
+
+
 # ── Audio devices ────────────────────────────────────────────────────────────
 # Stored as device NAMES, not sounddevice indices. Indices shift every time a
 # USB device is plugged in or removed, so a saved index silently starts pointing
