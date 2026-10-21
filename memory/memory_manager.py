@@ -402,7 +402,7 @@ def all_entries_for_ui() -> list[dict]:
     return rows
 
 def remember(key: str, value: str, category: str = "notes") -> str:
-    valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
+    valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes", "playlist"}
     if category not in valid:
         category = "notes"
     update_memory({category: {key: {"value": value}}})
