@@ -332,21 +332,29 @@ def _step_failed(result: str) -> bool:
             or (result.startswith("Tool '") and " failed: " in result))
 
 
-def _step_parked(result: str) -> bool:
+def _pending_title() -> str:
+    try:
+        return confirm.pending_title()
+    except Exception:
+        return ""
+
+
+def _step_parked(result: str, pending_before: str,
+                 pending_after: str) -> bool:
     """Did this step stop at the confirmation gate instead of running?
 
-    Primary signal: a confirmation is actually pending on screen now.
-    The textual signals cover the cases where nothing could be parked —
-    no interface bound — where the gate's refusal sentence is the only
-    evidence the step did not run."""
+    Textual signals first: the gate's own pending marker, or its refusal
+    sentence when no interface is bound (nothing could be parked, so
+    the refusal is the only evidence the step did not run). The third
+    signal is a confirmation that APPEARED during this step — compared
+    against what was already on screen before it, because a banner left
+    over from before the replay says nothing about this step, and a
+    benign step must never be blamed for it."""
     if "[CONFIRMATION_PENDING]" in result:
         return True
     if result.startswith("I cannot confirm"):
         return True
-    try:
-        return bool(confirm.pending_title())
-    except Exception:
-        return False
+    return bool(pending_after) and pending_after != pending_before
 
 
 @dataclass
@@ -434,6 +442,7 @@ def run_routine(name: str, params=None) -> ReplayReport:
         for i, step in enumerate(steps, 1):
             tool = str(step.get("tool", "?"))
             args = _substitute(step.get("args", {}), params)
+            pending_before = _pending_title()
             exc = None
             try:
                 if report.trusted:
@@ -449,7 +458,7 @@ def run_routine(name: str, params=None) -> ReplayReport:
                 break
             result = str(result or "")
             preview = result.replace("\n", " ")[:200]
-            if _step_parked(result):
+            if _step_parked(result, pending_before, _pending_title()):
                 report.lines.append(
                     f"{i}. {tool} -> waiting for on-screen confirmation "
                     f"(did not run)")
