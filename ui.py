@@ -4712,6 +4712,7 @@ class MainWindow(QMainWindow):
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
         self.get_commands      = None   # callable: () -> list[dict], set by JarvisLive
+        self.on_run_diagnostics = None  # callable: () -> None — run the diagnostics pass, set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
@@ -5997,6 +5998,14 @@ class MainWindow(QMainWindow):
         cmd_btn.clicked.connect(self._open_commands)
         lay.addWidget(cmd_btn)
 
+        diag_btn = QPushButton("🩺  DIAGNOSTICS")
+        diag_btn.setFixedHeight(26)
+        diag_btn.setFont(QFont("Courier New", 7))
+        diag_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        diag_btn.setStyleSheet(_BTN_STYLE_DIM)
+        diag_btn.clicked.connect(self._run_diagnostics)
+        lay.addWidget(diag_btn)
+
         plugin_btn = QPushButton("🧩  PLUGINS")
         plugin_btn.setFixedHeight(26)
         plugin_btn.setFont(QFont("Courier New", 7))
@@ -7227,6 +7236,30 @@ class MainWindow(QMainWindow):
         self._centre_overlay(ov)
         self._commands_overlay = ov
 
+    def _run_diagnostics(self):
+        """The DIAGNOSTICS button: run the self-test pass
+        (core/diagnostics.py) and show the checklist. JarvisLive
+        binds on_run_diagnostics — it owns the speech channel the
+        summary is announced through — so the button normally just
+        asks. Unbound (early startup, tests) the pass runs here on
+        a daemon thread and delivers panel + log itself; only the
+        spoken line is missing."""
+        if self.on_run_diagnostics:
+            self.on_run_diagnostics()
+            return
+        import threading
+
+        def _work():
+            from core import diagnostics as _diag
+            results = _diag.run_all()
+            _diag.deliver(
+                results,
+                show_content=lambda t, x: self._content_sig.emit(t[:48], x[:4000]),
+                write_log=lambda line: self._log_sig.emit(line))
+
+        threading.Thread(target=_work, daemon=True,
+                         name="diagnostics").start()
+
     # ── Irreversible-action confirmation ─────────────────────────────────────
 
     def _show_confirm_banner(self, title: str, detail: str):
@@ -7510,6 +7543,14 @@ class JarvisUI:
     @get_commands.setter
     def get_commands(self, cb):
         self._win.get_commands = cb
+
+    @property
+    def on_run_diagnostics(self):
+        return self._win.on_run_diagnostics
+
+    @on_run_diagnostics.setter
+    def on_run_diagnostics(self, cb):
+        self._win.on_run_diagnostics = cb
 
     @property
     def on_wake_toggle(self):

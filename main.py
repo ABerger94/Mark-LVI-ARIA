@@ -83,6 +83,7 @@ from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import routines as routines_core
 from core                      import scheduler as scheduler_core
+from core                      import diagnostics as diagnostics_core
 from core.selfedit             import SelfEditWatcher
 from types                     import SimpleNamespace
 from core                      import audio_devices
@@ -760,6 +761,7 @@ class JarvisLive:
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.get_commands = self._commands_for_ui  # Commands screen rows
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
+        self.ui.on_run_diagnostics = self._diagnostics_for_ui  # 🩺 DIAGNOSTICS button
 
         # ── Wake word ────────────────────────────────────────────────────────
         # _awake gates the mic (see _listen_audio) and the background speakers.
@@ -795,6 +797,46 @@ class JarvisLive:
             self._action_registry.get_tool_declarations(),
             self._plugin_registry.get_tool_declarations(),
         )
+
+    def _diagnostics_for_ui(self) -> None:
+        """The DIAGNOSTICS button in the SYS rail: the same pass
+        the run_diagnostics tool runs, delivered the same way —
+        checklist to the panel, the [Diagnostics] block in the
+        log, an incident on failure, one spoken line — through
+        core/diagnostics.deliver(). The pass itself runs off
+        both the Qt thread and the event loop (run_all pools its
+        probes). Re-entry while a pass is running is refused:
+        the probes are read-only, but two spoken summaries at
+        once would be noise, not information."""
+        if getattr(self, "_diagnostics_running", False):
+            return
+        self._diagnostics_running = True
+
+        def _deliver(results):
+            diagnostics_core.deliver(
+                results,
+                show_content=self.ui.show_content,
+                write_log=self.ui.write_log,
+                announce=lambda text: self.plugin_say(
+                    "Announce this to the user now, in one short "
+                    "sentence, in their own language: " + text))
+
+        def _work():
+            try:
+                _deliver(diagnostics_core.run_all())
+            finally:
+                self._diagnostics_running = False
+
+        loop = getattr(self, "_loop", None)
+        try:
+            if loop:
+                asyncio.run_coroutine_threadsafe(
+                    asyncio.to_thread(_work), loop)
+                return
+        except Exception:
+            pass   # no usable loop — the plain thread below serves
+        threading.Thread(target=_work, daemon=True,
+                         name="diagnostics").start()
 
     def _all_tool_names(self) -> set:
         """Every tool name the model can call right now — the same three
