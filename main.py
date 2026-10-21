@@ -80,7 +80,9 @@ from core                     import gemini as _gemini
 from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
+from core                      import routines as routines_core
 from core.selfedit             import SelfEditWatcher
+from types                     import SimpleNamespace
 from core                      import audio_devices
 from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
@@ -762,6 +764,37 @@ class JarvisLive:
             self._action_registry.get_tool_declarations(),
             self._plugin_registry.get_tool_declarations(),
         )
+
+    def _all_tool_names(self) -> set:
+        """Every tool name the model can call right now — the same three
+        registries the Commands screen reads, as a set. core/routines.py
+        pre-flights a replay against this: a step naming a tool that no
+        longer exists aborts the routine before anything runs."""
+        return ({t["name"] for t in TOOL_DECLARATIONS}
+                | self._action_registry.names()
+                | {d["name"] for d in
+                   self._plugin_registry.get_tool_declarations()})
+
+    def _execute_routine_step(self, name: str, args: dict) -> str:
+        """The routines executor, bound in run() (core/routines.py).
+
+        A replayed step goes through _execute_tool itself — a throwaway
+        call object in, the FunctionResponse's result text out — so it
+        receives the inline branches, the gates, the outcome text and
+        the capture exclusion exactly as a spoken call does. This is
+        invoked from whichever worker thread the replay is running on;
+        the coroutine is scheduled onto the session loop and waited on.
+        The wait cannot starve the loop: _execute_tool hands registry
+        work to the default executor pool, which has other threads."""
+        if self._loop is None:
+            raise RuntimeError("the session loop is not running")
+        fc = SimpleNamespace(id=f"routine-{name}", name=name,
+                             args=dict(args or {}))
+        future = asyncio.run_coroutine_threadsafe(
+            self._execute_tool(fc), self._loop)
+        response = future.result(timeout=600)
+        payload = getattr(response, "response", None) or {}
+        return str(payload.get("result", "Done."))
 
     # ── Wake word: state machine ─────────────────────────────────────────────
 
@@ -1565,6 +1598,20 @@ class JarvisLive:
             self.ui.set_state("LISTENING")
 
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+
+        # Routine capture (Phase F1, core/routines.py): every executed call
+        # funnels through this method — inline tools, actions and plugins,
+        # for the Live session and the providers pipeline alike, since both
+        # feed the receive loop that calls this — so this is the one place
+        # a recording can see them all. After execution completes, as in
+        # ARIA's dispatch hook; the recording module decides what counts
+        # (the routine tools and save_memory are excluded there, and steps
+        # executed BY a replay are never captured). Guarded: a capture
+        # failure must never cost the user a tool result.
+        try:
+            routines_core.maybe_capture(name, args)
+        except Exception:
+            pass
 
         # A tool that declared itself NON_BLOCKING also says when its answer may
         # re-enter the conversation. Without this the model finishes whatever it
@@ -2489,6 +2536,13 @@ class JarvisLive:
             log  = self.ui.write_log,
         )
         set_trim_notifier(self.ui.write_log)
+
+        # Routines (Phase F1) replay through the same funnel live calls
+        # use, bound here with the other shared services: the executor
+        # routes each step back through _execute_tool, and pre-flight
+        # reads the live tool names from the three registries.
+        routines_core.bind_executor(self._execute_routine_step,
+                                    self._all_tool_names)
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that
