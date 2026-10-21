@@ -2552,7 +2552,7 @@ class JarvisLive:
         # tab and the spoken answer can never disagree.
         from core import panel_data as _panel_data
         self.ui.set_content_tab_providers(
-            inbox_fetcher=_panel_data.fetch_inbox_text,
+            inbox_fetcher=_panel_data.fetch_inbox,
             calendar_fetcher=_panel_data.fetch_calendar_text)
 
         # Tell the device picker the exact rates the streams open at, from the

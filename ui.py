@@ -1060,16 +1060,20 @@ class ContentTabs(QWidget):
     shown, and again when its Refresh button is pressed. Nothing
     fetches before a data tab is first shown, and the fetch never
     runs on the Qt thread — the tab shows "Loading\u2026" and the
-    finished text arrives by signal.
+    finished text arrives by signal. The panel header follows the
+    active tab (see header_title); this widget only computes the
+    title and signals — MainWindow paints it.
     """
 
-    _data_sig = pyqtSignal(str, str)   # (which, text) — fetch result, any thread
+    _data_sig = pyqtSignal(str, object)   # (which, result) — fetch result, any thread
+    header_changed = pyqtSignal()         # the panel header's title may have moved
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._providers = {"inbox": None, "calendar": None}
         self._loaded    = {"inbox": False, "calendar": False}
         self._loading   = set()
+        self._inbox_unread = None   # server's unseen count, once counted
         self._data_sig.connect(self._on_data)
 
         self.tabs = QTabWidget()
@@ -1180,6 +1184,27 @@ class ContentTabs(QWidget):
         look at, whichever tab they left selected."""
         self.tabs.setCurrentIndex(0)
 
+    def header_title(self, news_title: str) -> str:
+        """The content panel header's title, per active tab.
+
+        News keeps the title show_content() last set (the caller
+        passes it back in — pushed titles are MainWindow's to
+        remember). Calendar is just "Calendar". Inbox is
+        "Gmail Inbox - X Unread Emails" once a fetch has genuinely
+        counted the server's unseen mail; while a fetch is loading,
+        after an error, and before Gmail is connected the count is
+        unknown (None) and the header is the bare "Gmail Inbox" —
+        never an invented zero."""
+        idx = self.tabs.currentIndex()
+        if idx == 1:
+            if self._inbox_unread is None:
+                return "Gmail Inbox"
+            n = self._inbox_unread
+            return f"Gmail Inbox - {n} Unread Email" + ("" if n == 1 else "s")
+        if idx == 2:
+            return "Calendar"
+        return news_title
+
     def refresh(self, which: str):
         """Re-fetch a data tab now (its Refresh button)."""
         self._start_fetch(which)
@@ -1189,6 +1214,7 @@ class ContentTabs(QWidget):
         which = {1: "inbox", 2: "calendar"}.get(index)
         if which and not self._loaded[which]:
             self._start_fetch(which)
+        self.header_changed.emit()
 
     def _start_fetch(self, which: str):
         if which in self._loading:
@@ -1200,25 +1226,46 @@ class ContentTabs(QWidget):
             self._loaded[which] = True
             return
         self._loading.add(which)
+        if which == "inbox":
+            # A count in flight is not a count: the header drops
+            # back to the bare title until this fetch lands with
+            # a genuinely counted number (or none).
+            self._inbox_unread = None
+            self.header_changed.emit()
         self._refresh_btns[which].setEnabled(False)
         disp.setPlainText("Loading\u2026")
 
         def work():
             try:
-                text = provider()
+                result = provider()
             except Exception as e:
-                text = f"Couldn't load this tab just now.\n\n{e}"
-            self._data_sig.emit(which, str(text))
+                result = f"Couldn't load this tab just now.\n\n{e}"
+            self._data_sig.emit(which, result)
 
         threading.Thread(target=work, daemon=True,
                          name=f"content-tab-{which}").start()
 
-    def _on_data(self, which: str, text: str):
-        """Slot — Qt main thread. Land a finished fetch."""
+    def _on_data(self, which: str, result):
+        """Slot — Qt main thread. Land a finished fetch.
+
+        A result is either finished plain text (Calendar, and any
+        simple provider) or a dict from core/panel_data's inbox
+        fetch — {"text", "html", "unread"}: painted rich where
+        html is present, and its unread count is what the panel
+        header shows while the Inbox tab is in front."""
         self._loading.discard(which)
         self._loaded[which] = True
         disp = self._displays[which]
-        disp.setPlainText(text)
+        if isinstance(result, dict):
+            if result.get("html"):
+                disp.setHtml(result["html"])
+            else:
+                disp.setPlainText(str(result.get("text", "")))
+            if which == "inbox":
+                self._inbox_unread = result.get("unread")
+                self.header_changed.emit()
+        else:
+            disp.setPlainText(str(result))
         disp.moveCursor(disp.textCursor().MoveOperation.Start)
         self._refresh_btns[which].setEnabled(True)
 
@@ -6201,9 +6248,20 @@ class MainWindow(QMainWindow):
         # the first time they are shown.
         self._content_tabs_view = ContentTabs()
         self._content_display = self._content_tabs_view.news_display
+        self._content_news_title = "BRIEFING"
+        self._content_tabs_view.header_changed.connect(
+            self._sync_content_title)
         lay.addWidget(self._content_tabs_view)
 
         return w
+
+    def _sync_content_title(self):
+        """Slot — the panel header follows the active tab: News
+        restores the last pushed title, Inbox carries the unseen
+        count once genuinely counted, Calendar is "Calendar".
+        ContentTabs computes the title; this only paints it."""
+        self._content_title_lbl.setText(
+            self._content_tabs_view.header_title(self._content_news_title))
 
     def _show_content(self, title: str, text: str):
         """Slot — runs on Qt main thread. Updates and shows the content panel."""
@@ -6211,7 +6269,8 @@ class MainWindow(QMainWindow):
         # The panel opens below the head, so the head looks down at it. It is a
         # tiny thing that answers "did that land?" before you read a word.
         self.hud.glance(0.0, -0.85, hold=1.3)
-        self._content_title_lbl.setText(title.upper()[:48])
+        self._content_news_title = title.upper()[:48]
+        self._content_title_lbl.setText(self._content_news_title)
         self._content_ts_lbl.setText(_time.strftime("%H:%M:%S"))
         self._content_display.setPlainText(text)
         self._content_display.moveCursor(
@@ -6305,7 +6364,8 @@ class MainWindow(QMainWindow):
         # it: Turkish "Sözleşmesi" comes back "SÖZLEŞMESI", having lost the
         # dotted capital İ. Python has no locale-aware upper to reach for, and
         # imposing one language's rules on all of them is the bug, not the fix.
-        self._content_title_lbl.setText((title or "Document")[:48])
+        self._content_news_title = (title or "Document")[:48]
+        self._content_title_lbl.setText(self._content_news_title)
         self._content_ts_lbl.setText(_time.strftime("%H:%M:%S"))
         self._content_display.setHtml("".join(parts))
         self._content_display.moveCursor(

@@ -388,8 +388,90 @@ def test_main_binds_panel_data_to_the_panel():
     src = inspect.getsource(main_module.JarvisLive.run)
     assert "panel_data" in src
     assert "set_content_tab_providers" in src
-    assert "fetch_inbox_text" in src
+    assert "_panel_data.fetch_inbox" in src
     assert "fetch_calendar_text" in src
+
+
+# ── rich results + the dynamic panel header ──────────────────────────
+
+def _rich_result(unread=3, html="<b>rich inbox</b>", text="plain inbox"):
+    return {"text": text, "html": html, "unread": unread}
+
+
+def test_dict_result_renders_html_and_feeds_the_header():
+    view = _view()
+    view.set_providers(inbox=lambda: _rich_result(unread=3))
+    assert view.header_title("NEWS — TOP") == "NEWS — TOP"
+    view.tabs.setCurrentIndex(1)
+    # in flight, the count is not a count yet — bare title
+    assert view.header_title("NEWS — TOP") == "Gmail Inbox"
+    disp = view._displays["inbox"]
+    assert _pump_until(lambda: "rich inbox" in disp.toHtml())
+    assert (view.header_title("NEWS — TOP")
+            == "Gmail Inbox - 3 Unread Emails")
+    view.tabs.setCurrentIndex(2)
+    assert view.header_title("NEWS — TOP") == "Calendar"
+    view.tabs.setCurrentIndex(0)
+    assert view.header_title("NEWS — TOP") == "NEWS — TOP"
+
+
+def test_header_singular_and_unknown_counts():
+    view = _view()
+    view.set_providers(inbox=lambda: _rich_result(unread=1))
+    view.tabs.setCurrentIndex(1)
+    assert _pump_until(lambda: view._inbox_unread == 1)
+    assert view.header_title("N") == "Gmail Inbox - 1 Unread Email"
+
+    view2 = _view()
+    view2.set_providers(inbox=lambda: _rich_result(unread=None, html=""))
+    view2.tabs.setCurrentIndex(1)
+    disp2 = view2._displays["inbox"]
+    assert _pump_until(lambda: disp2.toPlainText() == "plain inbox")
+    assert view2.header_title("N") == "Gmail Inbox"
+
+
+def test_refresh_recounts_and_drops_the_stale_count_while_loading():
+    view = _view()
+    gate = threading.Event()
+    counts = iter([3, 5])
+
+    def provider():
+        n = next(counts)
+        if n == 5:
+            gate.wait(10)
+        return _rich_result(unread=n)
+    view.set_providers(inbox=provider)
+    view.tabs.setCurrentIndex(1)
+    assert _pump_until(lambda: view._inbox_unread == 3)
+    assert view.header_title("N") == "Gmail Inbox - 3 Unread Emails"
+    view._refresh_btns["inbox"].click()
+    # mid-refresh the old number must not linger in the header
+    assert view.header_title("N") == "Gmail Inbox"
+    gate.set()
+    assert _pump_until(lambda: view._inbox_unread == 5)
+    assert view.header_title("N") == "Gmail Inbox - 5 Unread Emails"
+
+
+def test_header_changed_fires_on_switch_and_on_data():
+    view = _view()
+    seen = []
+    view.header_changed.connect(lambda: seen.append(1))
+    view.set_providers(inbox=lambda: _rich_result(unread=2))
+    view.tabs.setCurrentIndex(1)
+    assert _pump_until(lambda: view._inbox_unread == 2)
+    assert len(seen) >= 2          # the switch, and the count landing
+
+
+def test_mainwindow_header_wiring():
+    build = inspect.getsource(ui_module.MainWindow._build_content_panel)
+    assert "header_changed" in build
+    assert "_content_news_title" in build
+    sync = inspect.getsource(ui_module.MainWindow._sync_content_title)
+    assert "header_title" in sync
+    show = inspect.getsource(ui_module.MainWindow._show_content)
+    assert "_content_news_title" in show
+    review = inspect.getsource(ui_module.MainWindow._show_review)
+    assert "_content_news_title" in review
 
 
 def test_show_content_and_review_select_the_news_tab():
