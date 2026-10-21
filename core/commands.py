@@ -61,6 +61,8 @@ EXAMPLE_PHRASES = {
     "read_email":           "Read my email",
     "triage_email":         "Triage my inbox",
     "send_email":           "Email Mum about Sunday",
+    "calendar_setup":       "Set up my calendar",
+    "check_calendar":       "What's on my calendar today?",
 }
 
 _SOURCE_ORDER = ("Built-in", "Action", "Plugin")
