@@ -989,6 +989,50 @@ class HudCanvas(QWidget):
             p.drawText(QRectF(cx - r, cy - fsz, r * 2, fsz * 2),
                        Qt.AlignmentFlag.AlignCenter, name)
 
+    def _draw_comet_head(self, p: QPainter, cx: float, cy: float,
+                         rad: float, phi: float, trail_dir: int,
+                         col: QColor, scale: float, mix) -> None:
+        """Draw one comet head on the circle of radius rad around
+        (cx, cy), at angle phi in the painter's device param — the
+        head sits at (cx + rad·cos phi, cy + rad·sin phi).
+
+        Treatment, shared by every rotating element of the waveform
+        core so the heads can never drift apart visually: a soft glow,
+        the bright core dot (radius 3.6 at scale 1, mix 0.95 — the dot
+        the lone sweep head always was), and a tapering trail of short
+        chord segments streaming in the trail_dir rotational direction
+        (+1 toward increasing phi, -1 toward decreasing phi). Callers
+        pass trail_dir pointing AWAY from the element's direction of
+        travel, so the trail always streams behind the head. mix(col,
+        a) is _paint_wave_core's blend-onto-background closure, keeping
+        colours pre-mixed like the rest of the painter. Cost is
+        O(trail segments); nothing beyond a few points is allocated.
+        """
+        hx = cx + rad * math.cos(phi)
+        hy = cy + rad * math.sin(phi)
+        steps = 7
+        span = math.radians(30.0) * (0.55 + 0.45 * scale)
+        for i in range(steps):
+            f0 = i / steps
+            f1 = (i + 1) / steps
+            a0 = phi + trail_dir * span * f0
+            a1 = phi + trail_dir * span * f1
+            fade = (1.0 - f0) ** 1.4
+            pen = QPen(mix(col, 0.50 * fade),
+                       0.4 + 2.2 * scale * fade)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QPointF(cx + rad * math.cos(a0),
+                               cy + rad * math.sin(a0)),
+                       QPointF(cx + rad * math.cos(a1),
+                               cy + rad * math.sin(a1)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(mix(col, 0.16))
+        p.drawEllipse(QPointF(hx, hy), 8.0 * scale, 8.0 * scale)
+        p.setBrush(mix(col, 0.95))
+        p.drawEllipse(QPointF(hx, hy), 3.6 * scale, 3.6 * scale)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
     def _paint_wave_core(self, p: QPainter, cx: float, cy: float, r: float,
                          W: float = 0.0, H: float = 0.0):
         """Draw the waveform reactor ("Resonance") at (cx, cy), outer
@@ -1009,7 +1053,15 @@ class HudCanvas(QWidget):
         * EMISSION rings that burst outward when the level peaks
           (spawned in _step on an upward 0.72 crossing; here they are
           only expanded and faded);
-        * a comet head riding the fastest sweeping arc.
+        * comet heads — glow, bright core and a tapering trail —
+          at the leading end of every sweeping arc, at the ribbon's
+          angular origin, and on both spike rings at their first
+          spike's angle. Every head orbits on a FIXED radius — the
+          arc's own radius, the ribbon's base radius, the spike
+          rings' rest tip circles — so only its angle ever moves:
+          the elements bounce with the level, the heads must not
+          (Alek, 2026-10-22: "I just want them moving around the
+          center").
 
         DATA, honestly: the canvas has no PCM history, only the smoothed
         level (_amp_disp). _step therefore samples that level into
@@ -1094,7 +1146,8 @@ class HudCanvas(QWidget):
         p.drawLines(minor)
 
         # 5. Sweeping arcs, the reactor's table and state rate — plus a
-        #    comet head at the leading end of the fastest arc.
+        #    comet head at the leading end of each arc group's first
+        #    segment (the spot the lone head always rode).
         rate = 1.0 + (1.9 if self.state in ("THINKING", "PROCESSING") else 0.0) \
                    + (1.2 if self.speaking else 0.0)
         for k, (rr, span, count, dirn, col, a, wid) in enumerate((
@@ -1110,15 +1163,20 @@ class HudCanvas(QWidget):
             for sgm in range(count):
                 start = base + sgm * (360.0 / count)
                 p.drawArc(box, int(start * 16), int(span * 16))
-                if k == 0 and sgm == 0:
-                    ha = math.radians(-(start + span))
-                    hx = cx + rad * math.cos(ha)
-                    hy = cy + rad * math.sin(ha)
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(blend(acc, 0.95))
-                    p.drawEllipse(QPointF(hx, hy), 3.6, 3.6)
-                    p.setBrush(Qt.BrushStyle.NoBrush)
-                    p.setPen(QPen(blend(col, a), wid))
+            # Leading end, in the painter's device param (the head sits
+            # at (cx + rad·cos phi, cy + rad·sin phi)): a +dirn arc
+            # travels toward decreasing phi and leads with its
+            # (start + span) end; a -dirn arc travels toward increasing
+            # phi and leads with its start end. The trail streams the
+            # other way — always behind the motion.
+            if dirn > 0:
+                phi = -math.radians(base + span)
+                tdir = +1
+            else:
+                phi = -math.radians(base)
+                tdir = -1
+            self._draw_comet_head(p, cx, cy, rad, phi, tdir, col,
+                                  max(0.6, wid / 2.0), blend)
 
         # 6. Emission rings from voice peaks (spawned in _step).
         for stamp in self._wave_rings:
@@ -1183,6 +1241,16 @@ class HudCanvas(QWidget):
                                cy + rad * math.sin(ang)))
         p.setPen(QPen(blend(main, 0.35), 1.2))
         p.drawPolyline(pts)
+        # The ribbon is a closed loop — it has no leading end — so its
+        # comet head sits at the loop's angular origin (frac 0), on
+        # the ribbon's FIXED base radius: the radius the trace has at
+        # zero offset. Riding _off(0) instead made the head bob in
+        # and out with the level, which Alek rejected — the trace
+        # undulates, the head only orbits. The traces rotate toward
+        # increasing angle (rot grows with t), so the trail streams
+        # toward decreasing angle, behind the motion.
+        self._draw_comet_head(p, cx, cy, base_r, rot,
+                              -1, acc, 0.85, blend)
 
         # 8. Dual spike rings over the same 72-bin split of the history:
         #    outer from bin MEAN level, inner from bin max STEP, both
@@ -1221,6 +1289,22 @@ class HudCanvas(QWidget):
         p.drawLines(out_lines)
         p.setPen(QPen(blend(main, 0.5), 1.4))
         p.drawLines(in_lines)
+        # One comet head per spike ring, at the first spike's angle on
+        # the ring's FIXED rest tip circle: r0 + the height a spike
+        # has at zero level (the idle constant 0.018, its phase
+        # shimmer averaged out), and r1 − the same rest height at the
+        # inner ring's 0.7 scale. Riding bin 0's live h_out/h_in made
+        # the heads ride up and down with the level — the spikes
+        # still do that; the heads only orbit. The rings rotate
+        # toward decreasing angle (ring_off falls as t grows —
+        # counter-rotating against the ribbon), so their trails
+        # stream toward increasing angle, behind the motion.
+        tip_out = base_r + r * (0.085 + 0.018)
+        tip_in = base_r - r * (0.085 + 0.018 * 0.7)
+        self._draw_comet_head(p, cx, cy, tip_out, ring_off, +1,
+                              acc if live else main, 0.7, blend)
+        self._draw_comet_head(p, cx, cy, tip_in, ring_off, +1,
+                              main, 0.6, blend)
 
         # 9. The inner ring the name sits in, and the name — sized exactly
         #    as the reactor sizes it.
