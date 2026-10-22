@@ -94,22 +94,28 @@ protect. Set `backup_mirror_dir` (say "set the backup mirror to …", or use
 Google Drive — and every memory and config snapshot is copied there too,
 verified by size. A mirror that fails costs one incident, never the backup.
 
-**Self-updates.** Pulling new code used to change the files and nothing
-else — she kept running the old code until somebody restarted her. A
-standalone sidecar (`updater.py`, spawned detached at startup, importing
-nothing from the app so it works when she can't) polls GitHub about once
-a minute. A new commit is pulled fast-forward only over a clean tracked
-tree — a dirty tree is announced once and left alone, never forced or
-stashed — and the new code is smoke-imported before she is restarted on
-it, the same import check her self-edit gate runs. When she is awake the
-restart announces itself first ("Update ready: …. Restarting in 60
-seconds — say wait to hold."); a hold defers it. A `git pull` done under
-her — by hand, or by ARIA herself through the shell tool — is caught the
-same way, by comparing the disk to the boot stamp she writes at startup.
-If the new code does not boot healthy, the sidecar rolls back to the
-last known-good commit, restarts her on that, and says so. `update_status`
-reports the sidecar's record; `"auto_update_enabled": false` in config
-turns the whole thing off, checked every poll.
+**Self-updates.** She watches her own code from inside her own process —
+the design the old ARIA ran on, ported in `core/codewatch.py`. At startup
+she snapshots SHA-256 hashes of her whole source tree; after every
+completed turn she re-hashes and diffs. Nothing polls in the background
+and no second process is involved. A change — from her own edit tools,
+a `git pull` done under her (by hand, or by ARIA herself through the
+shell tool), or a hand edit — is validated before anything restarts:
+every changed Python file is compiled and smoke-imported, the same
+import check her self-edit gate runs. A changed file that fails is
+restored from git (the broken copy kept beside it as
+`<file>.broken-<epoch>`), the restore is announced, and the restart
+loads the restored tree; a file whose restore fails is announced as
+broken and nothing restarts into it. A good change is announced —
+"My code changed — restarting now to load the new version." — she
+waits for speech to finish (bounded at 120 seconds), then relaunches
+herself: same interpreter, same script, then exit. She never kills a
+process — the only process she can restart is her own, which is why
+this design replaced the short-lived updater sidecar. A shared
+restart guard means the watcher and the main-process watchdog can
+never race two relaunches. `update_status` reports the watcher's
+ledger (`memory/codewatch.json`) — read-only; no tool can trigger a
+restart.
 
 ---
 
@@ -134,7 +140,7 @@ cannot list a tool she doesn't have. The shape of the suite:
 | MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` (a server connected mid-session offers its tools from the next session build) |
 | Watches | price watches (`watch_price`, `check_price_watches`, `list_price_watches`, `unwatch_price` — checks ride the scheduler), screen watches (`watch_screen`, `unwatch_screen`, `list_screen_watches`), news topic monitors (`manage_monitor`) |
 | Notes & cards | `take_note`, `read_notes`, `journal_write`; `mtg_card`, `mtg_advice` (Scryfall, keyless) |
-| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `update_status` (the self-update sidecar's record — read-only; nothing can trigger an update by tool), `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
+| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `update_status` (the code watcher's record — read-only; nothing can trigger a restart by tool), `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
 
 **Startup briefing.** On launch she greets you with a briefing composed in
 code — calendar, triaged inbox, weather, headlines from your monitored
@@ -376,10 +382,9 @@ py -3.12 -m pytest tests\test_commands.py -q
 
 Layout, briefly: `main.py` (session, dispatch, startup briefing),
 `ui.py` (the HUD), `core/` (prompt, gemini ladders, confirm, outcome,
-commands, scheduler, routines, self-edit, playback writer, watchdog,
-self-heal, backup mirror, delegation, MCP client,
-gmail/ical/github/spotify cores), `updater.py` (the self-update
-sidecar — standalone, stdlib + git only),
+commands, scheduler, routines, self-edit, code watcher, playback writer,
+watchdog, self-heal, backup mirror, delegation, MCP client,
+gmail/ical/github/spotify cores),
 `actions/` (one file per tool, self-describing), `providers/` (the opt-in
 pipeline), `memory/` (store, config, embeddings), `dashboard/` (phone UI),
 `tools/` (the ARIA memory importer).
