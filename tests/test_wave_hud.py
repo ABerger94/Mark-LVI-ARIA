@@ -231,3 +231,38 @@ def test_paint_event_has_wave_branch():
     assert "_paint_wave_core" in src
     # The neuron field is still painted before the wave centrepiece.
     assert src.index("_paint_neurons") < src.index("_paint_wave_core")
+
+
+# ── F3 cycles the HUD, same as the Controls button (Alek, 2026-10-22) ──
+
+def test_f3_shortcut_wired_to_the_same_hud_toggle():
+    # F4/F11 are QShortcuts built in MainWindow.__init__; F3 must ride the
+    # SAME mechanism and land on the SAME callable the HUD button uses —
+    # one cycle implementation, two triggers, nothing duplicated.
+    init_src = inspect.getsource(ui_module.MainWindow.__init__)
+    assert 'QShortcut(QKeySequence("F3"), self)' in init_src
+    assert ".activated.connect(self._toggle_hud_style)" in init_src
+    # The pre-existing shortcuts are untouched neighbours.
+    assert 'QShortcut(QKeySequence("F4"), self)' in init_src
+    assert 'QShortcut(QKeySequence("F11"), self)' in init_src
+
+def test_f3_and_button_share_one_toggle_callable():
+    # Both triggers name _toggle_hud_style; the cycle behaviour itself is
+    # pinned by test_toggle_cycles_face_core_wave_face above.
+    src = inspect.getsource(ui_module)
+    assert src.count("connect(self._toggle_hud_style)") == 2
+
+
+def test_footer_legend_lists_f3_with_f4_and_f11():
+    from PyQt6.QtWidgets import QLabel
+    win = ui_module.MainWindow.__new__(ui_module.MainWindow)
+    footer = win._build_footer()
+    texts = [lbl.text() for lbl in footer.findChildren(QLabel)]
+    legend = [t for t in texts if "[F4]" in t]
+    assert len(legend) == 1
+    assert "[F3] HUD" in legend[0]
+    assert "[F4] Mute" in legend[0]
+    assert "[F11] Fullscreen" in legend[0]
+    # Ascending key order, matching the order that was already there.
+    assert legend[0].index("[F3]") < legend[0].index("[F4]") \
+        < legend[0].index("[F11]")

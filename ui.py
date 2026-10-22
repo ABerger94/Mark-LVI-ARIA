@@ -5460,6 +5460,8 @@ class MainWindow(QMainWindow):
         if not self._ready:
             self._show_setup()
 
+        sc_hud = QShortcut(QKeySequence("F3"), self)
+        sc_hud.activated.connect(self._toggle_hud_style)
         sc_mute = QShortcut(QKeySequence("F4"), self)
         sc_mute.activated.connect(self._toggle_mute)
         sc_full = QShortcut(QKeySequence("F11"), self)
@@ -7272,7 +7274,7 @@ class MainWindow(QMainWindow):
             l.setStyleSheet(f"color: {color}; background: transparent;")
             return l
 
-        lay.addWidget(_fl("[F4] Mute  ·  [F11] Fullscreen"))
+        lay.addWidget(_fl("[F3] HUD  ·  [F4] Mute  ·  [F11] Fullscreen"))
         lay.addStretch()
         lay.addWidget(_fl("Updates & Contributions by ABerger", C.PRI_DIM))
         return w
