@@ -96,7 +96,8 @@ from core.action_loader        import discover_actions
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
 from core.wake_word            import (
-    WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
+    WakeWordDetector, initial_awake, is_ready as wake_is_ready,
+    install_and_download as wake_install,
 )
 
 # How long the assistant stays awake with no user speech before it auto-sleeps
@@ -783,6 +784,10 @@ class JarvisLive:
         self._awake            = not self._wake_enabled
         self._wake_detector: WakeWordDetector | None = None
         self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
+        # Has any session connected yet in this process? The first connect
+        # comes up awake even in wake-word mode; reconnects preserve the
+        # current state instead (see core.wake_word.initial_awake).
+        self._connected_once = False
 
         # Restore the saved push-to-talk preference. Doing it here rather than
         # in __init__ means the hotkey thread only exists once there is a
@@ -3216,17 +3221,25 @@ class JarvisLive:
                         # is the whole point, and it is invisible otherwise.
                         self.ui.write_log("SYS: Reconnected — conversation restored.")
 
-                    # Wake word: if enabled, come up ASLEEP (mic gated, silent)
-                    # until the user says "Hey Jarvis" or taps wake in the UI.
+                    # Wake word mode: come up AWAKE on the first connect of
+                    # the process — she starts out listening (and the startup
+                    # briefing below can fire) instead of booting asleep. The
+                    # detector still runs, so she can be woken after an
+                    # auto-sleep. Reconnects preserve the current state: an
+                    # auto-sleep (or a live conversation) survives a blip.
                     if self._wake_enabled:
                         self._ensure_wake_detector()
-                        self._awake = False
-                        self.ui.set_state("SLEEPING")
-                        self.ui.write_log(f"SYS: {self._asst_name} online — sleeping. Say 'Hey Jarvis' to wake me.")
-                    else:
-                        self._awake = True
+                    self._awake = initial_awake(
+                        self._wake_enabled,
+                        first_session=not self._connected_once,
+                        current_awake=self._awake)
+                    self._connected_once = True
+                    if self._awake:
                         self.ui.set_state("LISTENING")
                         self.ui.write_log(f"SYS: {self._asst_name} online.")
+                    else:
+                        self.ui.set_state("SLEEPING")
+                        self.ui.write_log(f"SYS: {self._asst_name} online — sleeping. Say 'Hey Jarvis' to wake me.")
 
                     # A session is up: the outage episode (if any) is
                     # over, and a failover notice still owed is spoken
@@ -3279,9 +3292,10 @@ class JarvisLive:
                     if self._engine is not None:
                         tg.create_task(self._engine.warmup())
 
-                    # Morning briefing — fires once per process launch (if enabled).
-                    # Skipped in wake-word mode: it comes up asleep, and a briefing
-                    # would mean talking while "asleep".
+                    # Morning briefing — fires once per process launch (if enabled),
+                    # gated on being awake: she comes up awake at launch (even in
+                    # wake-word mode), so it fires then; a reconnect that finds her
+                    # asleep leaves it pending rather than talking over the sleep.
                     if not self._briefing_sent and get_brief_enabled() and self._awake:
                         self._briefing_sent = True
                         tg.create_task(self._send_startup_briefing())
