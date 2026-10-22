@@ -2,9 +2,9 @@
 
 What is being pinned shut:
 
-  * the tab structure: exactly News, Inbox, Calendar; News is the
-    panel's original display and pushed content still lands there
-    (show_content / the review renderer select it);
+  * the tab structure: exactly News, Inbox, Calendar, Fleet; News
+    is the panel's original display and pushed content still lands
+    there (show_content / the review renderer select it);
   * the data tabs FETCH NOTHING before they are first shown, load
     off-thread behind a visible "Loading…" state, and Refresh
     re-fetches;
@@ -302,7 +302,7 @@ def _view():
 def test_tab_structure_and_news_is_the_original_display():
     view = _view()
     labels = [view.tabs.tabText(i) for i in range(view.tabs.count())]
-    assert labels == ["News", "Inbox", "Calendar"]
+    assert labels == ["News", "Inbox", "Calendar", "Fleet"]
     assert view.tabs.currentIndex() == 0
     assert view.tabs.widget(0) is view.news_display
 

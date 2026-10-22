@@ -121,6 +121,8 @@ _RECORDING = {"name": None, "steps": [], "started_ts": None}
 # once would interleave into nonsense neither recording describes.
 _replay_lock = threading.Lock()
 _REPLAYING = False
+_REPLAYING_NAME = None
+_REPLAYING_SINCE = None
 
 # Bound once at startup by main.py (the confirm.bind pattern): the
 # executor routes a step back through JarvisLive._execute_tool, and the
@@ -177,6 +179,19 @@ def routine_names() -> list:
 def is_recording() -> bool:
     with _lock:
         return _RECORDING["name"] is not None
+
+
+
+def replay_state() -> dict:
+    """The live replay state, read back (the Fleet view's
+    routines row): whether a replay is running right now,
+    which routine it is, and since when. run_routine records
+    name + start where it sets _REPLAYING; this only reads
+    them — a status surface never invents a state the module
+    does not hold."""
+    return {"replaying": bool(_REPLAYING),
+            "name": _REPLAYING_NAME,
+            "since": _REPLAYING_SINCE}
 
 
 def start_recording(name: str) -> str:
@@ -384,7 +399,7 @@ def run_routine(name: str, params=None) -> ReplayReport:
     confirm.trusted_scope(). A failed step halts the replay — see the
     module docstring for why both differ from ARIA's loop.
     """
-    global _REPLAYING
+    global _REPLAYING, _REPLAYING_NAME, _REPLAYING_SINCE
     params = params or {}
     report = ReplayReport()
     sname = sanitize_name(name)
@@ -439,6 +454,8 @@ def run_routine(name: str, params=None) -> ReplayReport:
         return report
     try:
         _REPLAYING = True
+        _REPLAYING_NAME = sname
+        _REPLAYING_SINCE = time.time()
         for i, step in enumerate(steps, 1):
             tool = str(step.get("tool", "?"))
             args = _substitute(step.get("args", {}), params)
@@ -479,6 +496,8 @@ def run_routine(name: str, params=None) -> ReplayReport:
             report.lines.append(f"{i}. {tool} -> {preview}{mark}")
     finally:
         _REPLAYING = False
+        _REPLAYING_NAME = None
+        _REPLAYING_SINCE = None
         _replay_lock.release()
     _log(f"ran '{sname}' ({report.completed}/{report.total} steps, "
          f"trusted={report.trusted}, halted={report.halted is not None})")

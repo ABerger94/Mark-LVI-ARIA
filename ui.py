@@ -1466,7 +1466,7 @@ class SpotifyPanel(QWidget):
 
 class ContentTabs(QWidget):
     """
-    The content panel's tabbed body: News | Inbox | Calendar.
+    The content panel's tabbed body: News | Inbox | Calendar | Fleet.
 
     News is the panel's original display — pushed by show_content()
     (the startup briefing's list, web-search results) and by the
@@ -1482,6 +1482,10 @@ class ContentTabs(QWidget):
     finished text arrives by signal. The panel header follows the
     active tab (see header_title); this widget only computes the
     title and signals — MainWindow paints it.
+    Fleet is neither pushed nor pulled: it is live runtime state
+    (core/fleet.py's snapshot, rendered as text by its provider),
+    re-rendered by update_fleet() — when its tab is shown, on its
+    Refresh button, and on MainWindow's 1s tick while in front.
     """
 
     _data_sig = pyqtSignal(str, object)   # (which, result) — fetch result, any thread
@@ -1489,8 +1493,8 @@ class ContentTabs(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._providers = {"inbox": None, "calendar": None}
-        self._loaded    = {"inbox": False, "calendar": False}
+        self._providers = {"inbox": None, "calendar": None, "fleet": None}
+        self._loaded    = {"inbox": False, "calendar": False, "fleet": False}
         self._loading   = set()
         self._inbox_unread = None   # server's unseen count, once counted
         self._data_sig.connect(self._on_data)
@@ -1513,7 +1517,7 @@ class ContentTabs(QWidget):
 
         self._displays = {}
         self._refresh_btns = {}
-        for which, label in (("inbox", "Inbox"), ("calendar", "Calendar")):
+        for which, label in (("inbox", "Inbox"), ("calendar", "Calendar"), ("fleet", "Fleet")):
             page, disp, btn = self._data_page(which)
             self._displays[which] = disp
             self._refresh_btns[which] = btn
@@ -1588,14 +1592,18 @@ class ContentTabs(QWidget):
         return page, disp, btn
 
     # ── public surface (MainWindow / JarvisLive) ─────────────────────
-    def set_providers(self, inbox=None, calendar=None):
-        """Bind the pull sources for the data tabs (callables
-        returning finished text; they block, so they are only ever
-        invoked on a worker thread)."""
+    def set_providers(self, inbox=None, calendar=None, fleet=None):
+        """Bind the sources for the data tabs. Inbox/Calendar
+        callables return finished text and block, so they are
+        only ever invoked on a worker thread; the Fleet callable
+        renders live local state and is invoked inline (see
+        update_fleet)."""
         if inbox is not None:
             self._providers["inbox"] = inbox
         if calendar is not None:
             self._providers["calendar"] = calendar
+        if fleet is not None:
+            self._providers["fleet"] = fleet
 
     def show_news(self):
         """Bring the News tab forward — pushed content (a briefing,
@@ -1622,20 +1630,30 @@ class ContentTabs(QWidget):
             return f"Gmail Inbox - {n} Unread Email" + ("" if n == 1 else "s")
         if idx == 2:
             return "Calendar"
+        if idx == 3:
+            return "Fleet"
         return news_title
 
     def refresh(self, which: str):
         """Re-fetch a data tab now (its Refresh button)."""
+        if which == "fleet":
+            self.update_fleet()
+            return
         self._start_fetch(which)
 
     # ── fetching ─────────────────────────────────────────────────────
     def _on_tab_changed(self, index: int):
         which = {1: "inbox", 2: "calendar"}.get(index)
+        if index == 3:
+            self.update_fleet()
         if which and not self._loaded[which]:
             self._start_fetch(which)
         self.header_changed.emit()
 
     def _start_fetch(self, which: str):
+        if which == "fleet":
+            self.update_fleet()
+            return
         if which in self._loading:
             return
         provider = self._providers.get(which)
@@ -1687,6 +1705,43 @@ class ContentTabs(QWidget):
             disp.setPlainText(str(result))
         disp.moveCursor(disp.textCursor().MoveOperation.Start)
         self._refresh_btns[which].setEnabled(True)
+
+
+    # ── fleet (live state, not a fetch) ────────────────────────────
+    def fleet_visible(self) -> bool:
+        """Is the Fleet tab the one in front? MainWindow's tick
+        refreshes the tab only then — hidden, it costs nothing."""
+        return self.tabs.currentIndex() == 3
+
+    def update_fleet(self):
+        """Render the Fleet tab from its provider, right now.
+
+        The provider returns finished text composed from live
+        runtime state (core/fleet.render_text over a snapshot) —
+        local registry and file reads, no network — so unlike
+        the pulled tabs it renders inline, with no Loading… state
+        and no worker thread. Called when the tab is shown, by
+        its Refresh button, and by MainWindow's 1s tick while
+        the tab is in front. The scroll position survives a
+        re-render; identical text is left untouched."""
+        disp = self._displays["fleet"]
+        provider = self._providers.get("fleet")
+        if provider is None:
+            if not self._loaded["fleet"]:
+                disp.setPlainText("This tab isn't available in this build.")
+                self._loaded["fleet"] = True
+            return
+        try:
+            text = str(provider() or "")
+        except Exception as e:
+            text = f"Couldn't load this tab just now.\n\n{e}"
+        if text != disp.toPlainText():
+            bar = disp.verticalScrollBar()
+            pos = bar.value() if bar is not None else 0
+            disp.setPlainText(text)
+            if bar is not None:
+                bar.setValue(pos)
+        self._loaded["fleet"] = True
 
 
 class LogWidget(QTextEdit):
@@ -6167,6 +6222,15 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(_badge(APP_VERSION, C.PRI_DIM))
         lay.addSpacing(8)
+        # Fleet pill (core/fleet.py): the old ARIA frame's TASKS
+        # badge — a live count of delegated tasks + in-flight tool
+        # calls, refreshed by _tick_clock from the runtime
+        # registries. Hidden at zero: no badge for no work, so its
+        # presence is itself the signal.
+        self._tasks_pill = _badge("", C.ACC2)
+        self._tasks_pill.hide()
+        lay.addWidget(self._tasks_pill)
+        lay.addSpacing(8)
         self._drawer_btn = QPushButton("⚙")
         self._drawer_btn.setFixedSize(26, 26)
         self._drawer_btn.setFont(QFont("Courier New", 11))
@@ -6250,6 +6314,33 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
+        # Fleet (core/fleet.py): the header pill, and the Fleet
+        # tab while it is in front — refreshed on this same 1s
+        # tick. Guarded like the heartbeat above: a broken status
+        # read must never break the clock.
+        try:
+            self._refresh_fleet_pill()
+        except Exception:
+            pass
+
+    def _refresh_fleet_pill(self):
+        """The TASKS pill + Fleet tab live refresh (the 1s clock
+        tick calls this). The count comes from core/fleet's
+        registries — delegated tasks in flight plus tool calls in
+        flight — never from anything the model said; at zero the
+        pill hides, the old ARIA frame's rule exactly. The Fleet
+        tab re-renders only while it is in front, so an idle panel
+        costs one small count read a second."""
+        from core import fleet as _fleet
+        n = _fleet.running_count()
+        if n > 0:
+            self._tasks_pill.setText(f"TASKS: {n}")
+            self._tasks_pill.show()
+        else:
+            self._tasks_pill.hide()
+        view = getattr(self, "_content_tabs_view", None)
+        if view is not None and view.fleet_visible():
+            view.update_fleet()
 
     def _build_left_panel(self) -> QWidget:
         w = QWidget()
@@ -6745,7 +6836,7 @@ class MainWindow(QMainWindow):
         sep.setStyleSheet(f"color: {C.BORDER};"); lay.addWidget(sep)
 
         # ── tabbed display ────────────────────────────────────────────────────
-        # News | Inbox | Calendar. News is the original display —
+        # News | Inbox | Calendar | Fleet. News is the original display —
         # _content_display keeps pointing at it, so show_content()
         # and the review renderer write exactly where they always
         # did; Inbox and Calendar pull their data (core/panel_data)
@@ -6788,11 +6879,12 @@ class MainWindow(QMainWindow):
             self._center_split.setSizes([max(total - 220, 120), 220])
 
 
-    def set_content_tab_providers(self, inbox=None, calendar=None):
+    def set_content_tab_providers(self, inbox=None, calendar=None, fleet=None):
         """Bind the content panel's Inbox/Calendar pull sources
         (JarvisLive wires core/panel_data here at startup)."""
         self._content_tabs_view.set_providers(inbox=inbox,
-                                              calendar=calendar)
+                                              calendar=calendar,
+                                              fleet=fleet)
 
     # ── document review ──────────────────────────────────────────────────────
     # Rendered as rich text into the content panel that already exists, rather
@@ -8144,11 +8236,13 @@ class JarvisUI:
         self._win._content_sig.emit(title[:48], text[:4000])
 
     def set_content_tab_providers(self, inbox_fetcher=None,
-                                  calendar_fetcher=None):
+                                  calendar_fetcher=None,
+                                  fleet_fetcher=None):
         """Bind the content panel's Inbox/Calendar data providers
         (core/panel_data fetchers — composed off the Qt thread)."""
         self._win.set_content_tab_providers(
-            inbox=inbox_fetcher, calendar=calendar_fetcher)
+            inbox=inbox_fetcher, calendar=calendar_fetcher,
+            fleet=fleet_fetcher)
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.

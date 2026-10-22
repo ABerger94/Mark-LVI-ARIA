@@ -18,6 +18,14 @@ READ-ONLY, BY DESIGN
     Delegated tasks never see it (main.py's _DELEGATED_EXCLUDE):
     a background task has no business reporting on — or being
     mistaken about — the code state of the app it runs inside.
+
+THE FLEET SECTION
+    The answer also carries the fleet: delegated tasks and tool
+    calls running right now, rendered from core/fleet.py's
+    snapshot() — the very snapshot the HUD's Fleet tab paints —
+    so when she says "I'm working on it in the background", the
+    claim and the screen read from one source and cannot tell
+    two different stories.
 """
 
 from __future__ import annotations
@@ -28,7 +36,7 @@ import sys
 import time
 from pathlib import Path
 
-from core import outcome
+from core import fleet, outcome
 
 
 def get_base_dir() -> Path:
@@ -141,8 +149,13 @@ def update_status(parameters: dict = None, player=None,
         events = ledger.get("events") or []
         if events:
             facts["last_event"] = events[-1].get("kind", "?")
+    snap = fleet.snapshot()
+    facts["fleet_running"] = snap["running_count"]
+    facts["fleet_delegated_active"] = snap["delegated_active"]
+    facts["fleet_calls_in_flight"] = len(snap["inflight"])
     return outcome.done("update_status", **facts) + "\n" + \
-        render_status(ledger, head)
+        render_status(ledger, head) + "\n" + \
+        fleet.render_summary(snap)
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
@@ -153,8 +166,11 @@ TOOL = {
         "version on disk, the version she booted with, how many "
         "files are watched, how many turn-end checks have run, "
         "whether a restart is armed, and the most recent watcher "
-        "event (change, restore, restart). Read-only — it cannot "
-        "start, stop or trigger a restart."
+        "event (change, restore, restart). Also reports the "
+        "fleet: delegated background tasks and tool calls "
+        "running right now, from the same runtime snapshot the "
+        "Fleet tab shows. Read-only — it cannot start, stop or "
+        "trigger a restart."
     ),
     "brief": "Report the code watcher's state (read-only).",
     "tier": "extra",

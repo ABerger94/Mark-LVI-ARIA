@@ -89,6 +89,7 @@ from core                      import diagnostics as diagnostics_core
 from core                      import watchdog as watchdog_core
 from core                      import codewatch as codewatch_core
 from core                      import delegation as delegation_core
+from core                      import fleet as fleet_core
 from core                      import notify as notify_core
 from core                      import mcp_client as mcp_client_core
 from types                     import SimpleNamespace
@@ -1704,6 +1705,36 @@ class JarvisLive:
         return out
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
+        """The one execution funnel — every tool call, from the
+        Live session, the providers pipeline, a routine replay or
+        a delegated task, passes through here (the paths below
+        all call this method). So this is where the Fleet
+        activity registry (core/fleet.py) hooks in: begin on
+        entry, finish in a finally — the registry then holds what
+        is genuinely in flight and what genuinely just ran,
+        whatever the model later says about it. The registry
+        never raises; a failure to record must never cost a tool
+        its result, and an exception in the call still finishes
+        the record (as a failure) on its way out."""
+        token = fleet_core.begin(
+            getattr(fc, "name", ""),
+            fleet_core.detail_for(getattr(fc, "name", ""),
+                                  getattr(fc, "args", None)))
+        try:
+            resp = await self._execute_tool_impl(fc)
+        except Exception:
+            fleet_core.finish(token, ok=False)
+            raise
+        result_text = ""
+        try:
+            payload = getattr(resp, "response", None) or {}
+            result_text = str(payload.get("result", "") or "")
+        except Exception:
+            result_text = ""
+        fleet_core.finish(token, ok=fleet_core.result_ok(result_text))
+        return resp
+
+    async def _execute_tool_impl(self, fc) -> types.FunctionResponse:
         name = fc.name
         args = dict(fc.args or {})
 
@@ -3168,11 +3199,14 @@ class JarvisLive:
         # Content panel tabs (UI TABS): the Inbox and Calendar tabs
         # pull from the same Gmail / iCal sources the tools speak
         # from, composed by core/panel_data off the Qt thread — the
-        # tab and the spoken answer can never disagree.
+        # tab and the spoken answer can never disagree. The Fleet
+        # tab renders core/fleet's snapshot of live runtime state
+        # (no fetch at all — registry reads, on the panel's tick).
         from core import panel_data as _panel_data
         self.ui.set_content_tab_providers(
             inbox_fetcher=_panel_data.fetch_inbox,
-            calendar_fetcher=_panel_data.fetch_calendar_text)
+            calendar_fetcher=_panel_data.fetch_calendar_text,
+            fleet_fetcher=fleet_core.render_text)
 
         # Tell the device picker the exact rates the streams open at, from the
         # constants that actually open them — so it can never list a device that

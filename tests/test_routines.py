@@ -535,7 +535,10 @@ def test_main_capture_hook_and_executor_binding():
     executor must be bound where the other shared services are."""
     import main
 
-    execute_src = inspect.getsource(main.JarvisLive._execute_tool)
+    # The funnel is a wrapper (the Fleet registry's begin/finish)
+    # around _execute_tool_impl, which holds the capture hook —
+    # the hook must sit in that one implementation both engines feed.
+    execute_src = inspect.getsource(main.JarvisLive._execute_tool_impl)
     assert "routines_core.maybe_capture(name, args)" in execute_src
 
     run_src = inspect.getsource(main.JarvisLive.run)

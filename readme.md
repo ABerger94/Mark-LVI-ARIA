@@ -115,7 +115,8 @@ this design replaced the short-lived updater sidecar. A shared
 restart guard means the watcher and the main-process watchdog can
 never race two relaunches. `update_status` reports the watcher's
 ledger (`memory/codewatch.json`) — read-only; no tool can trigger a
-restart.
+restart. It also reports the fleet (below), from the same snapshot
+the Fleet tab paints.
 
 ---
 
@@ -140,7 +141,7 @@ cannot list a tool she doesn't have. The shape of the suite:
 | MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` (a server connected mid-session offers its tools from the next session build) |
 | Watches | price watches (`watch_price`, `check_price_watches`, `list_price_watches`, `unwatch_price` — checks ride the scheduler), screen watches (`watch_screen`, `unwatch_screen`, `list_screen_watches`), news topic monitors (`manage_monitor`) |
 | Notes & cards | `take_note`, `read_notes`, `journal_write`; `mtg_card`, `mtg_advice` (Scryfall, keyless) |
-| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `update_status` (the code watcher's record — read-only; nothing can trigger a restart by tool), `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
+| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `update_status` (the code watcher's record plus the fleet — what is actually running right now; read-only, nothing can trigger a restart by tool), `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
 
 **Startup briefing.** On launch she greets you with a briefing composed in
 code — calendar, triaged inbox, weather, headlines from your monitored
@@ -166,13 +167,23 @@ needed.
 - **Left rail (SYS MONITOR):** system readouts, and under them the
   **Spotify panel** — track and artist while something plays, quiet
   otherwise.
-- **Content panel:** tabs — **News | Inbox | Calendar**. News is where
+- **Content panel:** tabs — **News | Inbox | Calendar | Fleet**. News is where
   briefings, search results and document reviews land. Inbox shows your
   latest 15 Gmail messages as per-message blocks grouped by day, with triage
   labels; Calendar shows the next 7 days. Both fetch off the UI thread, with
   a Refresh button and honest not-connected/error states. The panel header
   follows the tab: the news title on News, `Gmail Inbox - X Unread Emails`
-  (a real count, once counted) on Inbox, `Calendar` on Calendar.
+  (a real count, once counted) on Inbox, `Calendar` on Calendar, `Fleet` on
+  Fleet.
+- **Fleet tab + header pill:** the old ARIA Tasks view's rule — every row is
+  runtime state, never anything the model said. The tab shows delegated
+  background tasks (goal, status, elapsed), the tool call in flight right now
+  (a shell call shows its actual command line), active watches and the next
+  scheduled items, the code watcher's / watchdog's / MCP state, and the
+  recent finished calls with durations. It re-renders every second while in
+  front; when nothing is running it says so, in so many words. The header
+  carries the matching pill — `TASKS: n` — only while n > 0. If she says
+  she's working in the background and there's no row, she isn't.
 - **Centrepiece:** three displays, cycled by the **HUD button in
   Controls** (face → reactor core → waveform → face); the choice is
   instant and survives restarts. The **animated face** (above); the
