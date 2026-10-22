@@ -42,10 +42,21 @@ THE SHAPE OF THE FIX
     queued-but-unwritten batch, so a barge-in leaves at most the one
     in-flight batch sounding — the same bound the old design had.
 
-    The queue is bounded (MAX_QUEUED batches). If the writer ever
-    wedges, submit() evicts the OLDEST unwritten batch instead of
-    piling up latency: speech skips forward rather than drifting
-    ever further behind the conversation.
+    The queue is a deep jitter buffer (MAX_QUEUED batches, ~5 min of
+    speech at the 200 ms cap) and submit() NEVER evicts queued speech.
+    The first version of this module bounded the queue at 10 batches
+    and evicted the OLDEST unwritten batch on overflow — a design
+    error, proven by Alek's 2026-10-22 video of a startup briefing
+    shredded into ~200 ms fragments with gaps from the first second:
+    Gemini Live delivers speech in bursts faster than realtime, the
+    10-batch queue saturated seconds into any long utterance, and
+    from there roughly every other batch was discarded unwritten.
+    The old design's blocking write was the flow control, and this
+    buffer is what replaces it: speech queues up and plays out whole,
+    however fast it arrives. The bound survives only as a
+    pathological guard — if it is ever hit, submit() drops the
+    INCOMING batch and counts it on `dropped`, rather than silently
+    discarding speech already accepted.
 """
 
 from __future__ import annotations
@@ -55,7 +66,8 @@ import threading
 import time
 from typing import Callable, Optional
 
-MAX_QUEUED = 10          # batches; ~2 s of speech at the 200 ms cap
+MAX_QUEUED = 1500       # batches; ~5 min of speech at the 200 ms cap.
+                         # A pathological guard only — see the header.
 _SLOW_WRITE_S = 2.0      # a ≤200 ms batch taking longer = degraded stream
 
 
@@ -71,9 +83,12 @@ class PlaybackWriter:
                                         or None for the system default.
         on_fallback(exc)                called when the chosen device
                                         fails to open and the default
-                                        is tried instead — the caller
-                                        prints/logs the warning there,
-                                        exactly as the inline open did.
+                                        is tried instead — ON THE
+                                        WRITER THREAD, so it may only
+                                        print, never touch the GUI.
+                                        The exception is also recorded
+                                        on `fallback_exc` before the
+                                        call, for the caller's thread.
         slow_write_s                    write-duration bound for the
                                         degradation check (tests shrink
                                         it; production keeps 2 s).
@@ -107,6 +122,17 @@ class PlaybackWriter:
         # The play loop polls it and ends playback, mirroring how a
         # failed stream.write used to break the loop.
         self.error: Optional[BaseException] = None
+        # Batches dropped because the jitter buffer hit its
+        # pathological guard bound. Public on purpose: speech loss is
+        # counted where the caller can see it, never silent.
+        self.dropped = 0
+        # The chosen device's open exception when the default was used
+        # instead. Recorded before on_fallback runs because on_fallback
+        # executes on the writer thread — a callback touching the GUI
+        # from here is a thread-safety bug (main.py's speaker fallback
+        # used to call ui.write_log from this thread). The caller
+        # reads this after start() and does GUI work on its own thread.
+        self.fallback_exc: Optional[BaseException] = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -128,23 +154,18 @@ class PlaybackWriter:
             raise err
 
     def submit(self, data: bytes) -> None:
-        """Hand one batch to the writer. Never blocks the caller: on a
-        full queue the oldest unwritten batch is evicted (see header)."""
+        """Hand one batch to the writer. Never blocks the caller and
+        never evicts speech already queued: the buffer is deep enough
+        (~5 min) that a full queue is pathological, and in that case
+        the INCOMING batch is dropped and counted on `dropped` —
+        accepted speech is never silently discarded (see header)."""
         if self._stop.is_set():
             return
         try:
             self._q.put_nowait(data)
-            return
         except queue.Full:
-            pass
-        try:
-            self._q.get_nowait()          # evict oldest unwritten batch
-        except queue.Empty:
-            pass
-        try:
-            self._q.put_nowait(data)
-        except queue.Full:
-            pass                          # writer is draining; drop ours
+            self.dropped += 1             # guard tripped: the loss is
+                                          # counted, never silent
 
     def flush(self) -> None:
         """Drop every queued-but-unwritten batch (barge-in). The batch
@@ -182,6 +203,11 @@ class PlaybackWriter:
         except Exception as e:
             if self._device is None:
                 raise
+            # Record BEFORE invoking the callback: on_fallback runs on
+            # this writer thread, so the caller needs the exception on
+            # `fallback_exc` to do any GUI-side warning on its own
+            # thread once start() returns.
+            self.fallback_exc = e
             if self._on_fallback is not None:
                 try:
                     self._on_fallback(e)
@@ -233,20 +259,30 @@ class PlaybackWriter:
                 if item is None or self._stop.is_set():
                     break
                 degraded = False
+                why = ""
                 t0 = time.time()
                 try:
                     self._stream.write(item)
                 except Exception as e:
-                    print(f"[JARVIS] ⚠️  Playback write failed: {e} — "
-                          f"re-opening the output stream")
+                    why = (f"Playback write failed: {e} — "
+                           f"re-opening the output stream")
                     degraded = True
                 else:
-                    if time.time() - t0 > self._slow_write_s:
-                        print(f"[JARVIS] ⚠️  Playback write took "
-                              f"{time.time() - t0:.1f}s — re-opening "
-                              f"the output stream")
+                    took = time.time() - t0
+                    if took > self._slow_write_s:
+                        why = (f"Playback write took {took:.1f}s — "
+                               f"re-opening the output stream")
                         degraded = True
                 if degraded:
+                    if self._stop.is_set():
+                        # Teardown is closing the stream under the
+                        # writer, so a failed write here is the close
+                        # racing us, not a sick device — this is the
+                        # "Stream is stopped [PaErrorCode -9983]" line
+                        # in Alek's 2026-10-22 console. Exit quietly:
+                        # no heal attempt, no prints.
+                        break
+                    print(f"[JARVIS] ⚠️  {why}")
                     self._close_stream()
                     if not self._open_fresh():
                         return           # error recorded; thread dies

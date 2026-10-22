@@ -2236,8 +2236,10 @@ class JarvisLive:
             # A chosen output that the host API accepts by name but refuses to
             # open (exclusive mode, wrong sample rate, device asleep) must not
             # cost the user their voice. Fall back to the default and say so.
+            # PRINT ONLY: the playback writer invokes this on its own thread,
+            # and Qt calls from a non-GUI thread are unsafe. The HUD log line
+            # is written after writer.start() returns — see fallback_exc.
             print(f"[JARVIS] ⚠️  Output device '{_spk_name}' failed: {_e} — using default")
-            self.ui.write_log(f"SYS: Speaker '{_spk_name}' unavailable — using system default.")
 
         # The stream lives on a dedicated writer thread (core/playback.py).
         # Writes used to go through the loop's default executor — the same
@@ -2251,6 +2253,11 @@ class JarvisLive:
         writer = PlaybackWriter(_open_spk, device=_spk_dev,
                                 on_fallback=_spk_fallback)
         writer.start()
+        if writer.fallback_exc is not None:
+            # The chosen speaker failed to open and the default took over;
+            # _spk_fallback already printed the console line on the writer
+            # thread. The HUD line belongs here, on the loop thread.
+            self.ui.write_log(f"SYS: Speaker '{_spk_name}' unavailable — using system default.")
         self._playback_writer = writer
 
         # Ask the device how far behind the speakers actually are, rather than

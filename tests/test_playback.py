@@ -13,11 +13,22 @@ and writing continues on the new stream, a slow write also triggers
 the heal, flush drops unwritten batches, and close is clean. Whether
 the choppiness is actually gone is a witness item for Alek's laptop —
 no fake stream can prove that.
+
+REGRESSION (2026-10-22, Alek's video): the first writer evicted the
+OLDEST queued batch whenever its 10-batch queue filled. Gemini Live
+delivers speech in bursts faster than realtime, so the queue filled
+seconds into any long utterance and roughly every other batch was
+discarded unwritten — the briefing came out shredded into ~200 ms
+fragments. The queue is now a deep jitter buffer that never evicts;
+the burst and guard tests below pin that shut. The same video's
+console showed the teardown race ("Stream is stopped
+[PaErrorCode -9983]" triggering a pointless heal as the stream was
+being closed) — pinned by the stop-during-write test.
 """
 import threading
 import time
 
-from core.playback import PlaybackWriter
+from core.playback import MAX_QUEUED, PlaybackWriter
 
 
 class FakeStream:
@@ -74,6 +85,7 @@ def test_batches_written_in_order_and_close_is_clean():
     assert streams[0].stopped and streams[0].closed
     assert not w.alive
     assert w.error is None
+    assert w.fallback_exc is None   # chosen device opened fine
     assert w.latency == 0.05     # read off the stream at open
 
 
@@ -93,6 +105,7 @@ def test_open_failure_on_chosen_device_falls_back_to_default():
     w.start()
     assert calls == [7, None]                    # chosen, then default
     assert len(fell_back) == 1                   # caller got to warn
+    assert w.fallback_exc is fell_back[0]        # ...and it was recorded
     w.submit(b"x")
     assert _wait_for(lambda: streams[0].writes == [b"x"])
     w.close()
@@ -189,3 +202,97 @@ def test_close_discards_pending_and_exits():
     assert not w.alive
     w.submit(b"late")          # after close: a no-op, never a crash
     assert streams[0].writes == [b"a"]
+
+
+def test_burst_all_written_in_order_none_dropped():
+    # The 2026-10-22 regression: Live delivers speech in bursts faster
+    # than realtime; against a slow stream the old 10-deep queue
+    # evicted roughly every other batch. 50 batches in one burst must
+    # ALL be written, in order, with the drop counter untouched.
+    streams = []
+    w = PlaybackWriter(_factory(streams, write_delay=0.01))
+    w.start()
+    sent = [f"burst-{i:02d}".encode() for i in range(50)]
+    for b in sent:
+        w.submit(b)
+    assert _wait_for(lambda: len(streams[0].writes) == 50, timeout=10.0)
+    assert streams[0].writes == sent
+    assert w.dropped == 0
+    assert len(streams) == 1          # no spurious heal along the way
+    w.close()
+
+
+def test_full_buffer_drops_incoming_and_counts_it():
+    # The MAX_QUEUED bound is a pathological guard only. When it trips,
+    # the INCOMING batch is dropped and counted — speech already
+    # accepted is never evicted to make room.
+    gate = threading.Event()
+    streams = []
+
+    class GatedStream(FakeStream):
+        def write(self, data):
+            gate.wait(10)         # hold the writer inside write
+            super().write(data)
+
+    def open_stream(device):
+        st = GatedStream()
+        streams.append(st)
+        return st
+
+    w = PlaybackWriter(open_stream)
+    w.start()
+    w.submit(b"in-flight")
+    assert _wait_for(lambda: w._q.empty())   # writer holds batch #1
+    for i in range(MAX_QUEUED):
+        w.submit(f"queued-{i}".encode())     # fills the buffer exactly
+    assert w.dropped == 0
+    w.submit(b"one-too-many")
+    assert w.dropped == 1                    # incoming dropped, counted
+    gate.set()
+    w.close()
+    # The in-flight batch survived: it was accepted, never evicted.
+    assert streams[0].writes[0] == b"in-flight"
+
+
+def test_stop_during_failing_write_exits_quietly(capsys):
+    # Teardown race from Alek's 2026-10-22 console: close lands while
+    # a write is in flight, the write fails with "Stream is stopped",
+    # and the old code treated it as a sick device — heal prints and
+    # a re-open attempt against a stream being torn down. With _stop
+    # set, the writer must exit quietly: no re-open, no error, no
+    # heal chatter.
+    holder, opens = {}, []
+
+    class RacingStream(FakeStream):
+        def write(self, data):
+            holder["w"].close()      # teardown lands mid-write
+            raise RuntimeError("Stream is stopped [PaErrorCode -9983]")
+
+    def open_stream(device):
+        st = RacingStream()
+        opens.append(st)
+        return st
+
+    w = PlaybackWriter(open_stream)
+    holder["w"] = w
+    w.start()
+    w.submit(b"only")
+    assert _wait_for(lambda: not w.alive)
+    assert len(opens) == 1               # no re-open was attempted
+    assert w.error is None               # teardown is not a failure
+    out = capsys.readouterr().out
+    assert "Playback write failed" not in out
+    assert "re-opened" not in out
+
+
+def test_fallback_exc_recorded_when_chosen_device_fails():
+    def open_stream(device):
+        if device == 7:
+            raise RuntimeError("exclusive mode")
+        return FakeStream()
+
+    w = PlaybackWriter(open_stream, device=7, on_fallback=lambda e: None)
+    w.start()
+    assert isinstance(w.fallback_exc, RuntimeError)
+    assert "exclusive mode" in str(w.fallback_exc)
+    w.close()
