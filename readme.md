@@ -37,6 +37,15 @@ llama.cpp, vLLM and Jan locally, and OpenAI, Groq, DeepSeek, Mistral, xAI,
 OpenRouter, Together, Cerebras and **Ollama Cloud** (`https://ollama.com/v1`)
 hosted — plus a custom endpoint. Pick in ⚙ → **ENGINE & PROVIDERS**.
 
+**Automatic failover.** If Gemini Live proves unrecoverable — every rung of
+its ladder resting at once, or three failures inside two minutes — and a
+providers pipeline is configured, she latches onto the pipeline for the
+rest of the run and says so once, in the log and the incident ledger. There
+is no switch-back mid-run: Live returns on the next launch, or when you
+change the engine in ⚙. The latch is gated by `engine_auto_failover`
+(default on). With no pipeline configured there is nothing to latch onto,
+and she names that fix once per outage instead of failing silently.
+
 **Persona.** Her identity — name, whose she is, the standing rules she works
 under — lives in the `[SELF]` section of `core/prompt.txt`. There is no
 separate soul file; that section *is* the soul, and it is on her self-edit
@@ -99,23 +108,25 @@ cannot list a tool she doesn't have. The shape of the suite:
 | Area | What's there |
 |---|---|
 | Computer & files | `open_app`, `computer_control`, `computer_settings`, `desktop_control`, `file_controller`, `file_processor`, `file_duplicates`, `file_find_advanced`, `file_organize`, `code_helper`, `dev_agent`, `run_shell_command` (a real terminal — every command shows verbatim on the HUD and runs only on CONFIRM, never inside a routine replay or a delegated task) |
-| Web & media | `web_search`, `browser_control`, `video_player`, `weather_report`, `flight_finder`, `game_updater` |
+| Web & media | `web_search`, `browser_control`, `video_player`, `youtube_video` (loads only when a display is present), `weather_report`, `flight_finder`, `game_updater` |
 | Spotify & DJ | `spotify` (now playing from the real window title, transport, per-app volume), `dj` (saved playlist → mood → labelled search, in that order — never an invented playlist), `save_playlist` (any Spotify link form, normalised and verified) |
 | Routines | `routine_record_start/stop`, `run_routine` (with `{{param}}` substitution), `list_routines`, `describe_routine`, `delete_routine`, `trust_routine`, `untrust_routine`, `export_routine_pack`, `import_routine_pack` |
-| Scheduling | in-app scheduler: `set_timer`, `set_recurring_task`, `list_scheduled_tasks`, `cancel_scheduled_task`, `break_reminders` — plus `reminder`, which writes OS-level reminders |
+| Scheduling | in-app scheduler: `set_timer`, `set_recurring_task`, `list_scheduled_tasks`, `cancel_scheduled_task`, `break_reminders`, `schedule_briefing` (a daily briefing at a set time) — plus `reminder`, which writes OS-level reminders |
 | Connections | `gmail_setup`, `read_email`, `triage_email`, `send_email`; `calendar_setup`, `check_calendar` (read-only iCal feed; recurring events expand — RRULE, EXDATE and RDATE honoured); `github_setup`, `github_create_repo`, `github_push_file`, `github_list_files`, `github_read_file`, `github_repo_info` (reads need the token only — arming gates writes); `provider_setup` |
 | Delegation | `delegate_task` (a prompt worked in the background by her own engine, up to 4 in flight), `task_status`, `task_cancel` — records in `memory/delegated_tasks.json`, completion announced through the scheduler |
-| MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` |
+| MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` (a server connected mid-session offers its tools from the next session build) |
 | Watches | price watches (`watch_price`, `check_price_watches`, `list_price_watches`, `unwatch_price` — checks ride the scheduler), screen watches (`watch_screen`, `unwatch_screen`, `list_screen_watches`), news topic monitors (`manage_monitor`) |
 | Notes & cards | `take_note`, `read_notes`, `journal_write`; `mtg_card`, `mtg_advice` (Scryfall, keyless) |
-| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
+| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
 
 **Startup briefing.** On launch she greets you with a briefing composed in
 code — calendar, triaged inbox, weather, headlines from your monitored
 topics — and presents exactly that. She asserts no plan that a source didn't
-write down. `morning_briefing` runs the same composition on demand. A source
-that isn't connected says so in its section; a slow source is skipped with a
-note rather than hanging the greeting.
+write down. `morning_briefing` runs the same composition on demand, and
+`schedule_briefing` delivers it daily at a set time — as a spoken turn, when
+she is running and awake. A source that isn't connected says so in its
+section; a slow source is skipped with a note rather than hanging the
+greeting.
 
 Plugins: drop a `.py` into `plugins/` (see `_template.py`) and it is
 discovered next launch. No plugins ship enabled in this fork.
@@ -139,6 +150,15 @@ needed.
   a Refresh button and honest not-connected/error states. The panel header
   follows the tab: the news title on News, `Gmail Inbox - X Unread Emails`
   (a real count, once counted) on Inbox, `Calendar` on Calendar.
+- **Centrepiece:** three displays, cycled by the **HUD button in
+  Controls** (face → reactor core → waveform → face); the choice is
+  instant and survives restarts. The **animated face** (above); the
+  **reactor core** — atmosphere glow, sweeping arcs and a ring of spikes
+  that grows with her voice; and the **waveform core** ("Resonance") —
+  her voice drawn as a polar waveform ribbon around her name, with two
+  counter-rotating spike rings (low band pushing out, high band in) and
+  emission rings that burst outward on volume peaks, all driven by her
+  live audio-level history. All three read the same state colours.
 - **Behind the centrepiece:** a precomputed neuron field — faint nodes
   and wiring around the core/face, with signal pulses travelling the
   edges — drawn under whichever centrepiece is active, in its state
@@ -164,6 +184,12 @@ it falls back to plain HTTP and says so loudly. Opt out of HTTPS with
 Pairing is an **8-character key** typed on the login page, or the QR code
 (one-time auto-login). The pages carry her configured name — ARIA by
 default.
+
+If Windows Firewall carries a block rule aimed at this copy of Python,
+the Remote Access panel warns about it beside the QR code — before any
+phone has connected, which is when a block rule can genuinely be the
+problem. The moment a phone connects, the warning hides itself: a
+connected phone disproves it.
 
 ---
 
@@ -221,10 +247,13 @@ Idempotent; her DJ playlists land in the store's `playlist` category, where
   and the gate fails closed). Gated today: PC restart, shutdown and Wi-Fi
   toggle; sending a message; sending email; deleting a file; a real
   file-organize run; deleting a routine; game installs (and update-with-
-  shutdown); dev-agent builds; creating/changing an MCP server's spec,
-  launching one, and removing one. A scheduled game update with nobody at
-  the screen is the one deliberate exception — gating it would kill it
-  silently.
+  shutdown); dev-agent builds; running a shell command; creating or
+  changing an MCP server's spec, launching one, and removing one. A
+  scheduled game update with nobody at the screen is the one deliberate
+  exception — gating it would kill it silently. A shell command's banner
+  shows the exact command and its working directory, and inside a routine
+  replay a shell step is refused outright rather than run on a trust
+  decision made earlier.
 - **Delegation inherits the gates.** A delegated task runs the same tools
   through the same dispatch; if one of its calls hits a confirmation gate,
   the task parks as *blocked* with the action named — it never bypasses,
