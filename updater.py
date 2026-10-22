@@ -173,41 +173,47 @@ def pid_alive(pid) -> bool:
         return False
 
 
-def pid_matches_app(pid, root: Path) -> bool:
-    """Verify `pid` is a python process running THIS checkout's
-    main.py. Where the platform cannot answer (no /proc, CIM
-    refused), the stamp files are the evidence — they live in this
-    checkout's memory/ and are written by the app itself — so an
-    unanswerable check trusts them. A check that CAN answer and says
-    no is final: never kill on a guess."""
+def pid_matches_app(pid, root: Path, runner=subprocess.run) -> bool:
+    """Verify `pid` is THIS checkout's main.py — on POSITIVE
+    evidence only — before anything is allowed to stop it.
+
+    The stamp/presence files prove what the app WAS when it wrote
+    them; pids get reused by the OS, and a force-kill aimed at a
+    reused pid can land on a process Windows cannot live without.
+    That is the 2026-10-22 incident: the old check treated an
+    unanswerable query as trust, the update restart killed the
+    wrong process, and the whole computer went down. A check that
+    cannot answer is a NO — callers then leave her running and
+    say so, which is always recoverable. A wrongful kill is not.
+    """
     if os.name == "nt":
         try:
-            r = subprocess.run(
+            r = runner(
                 ["powershell", "-NoProfile", "-Command",
-                 f"(Get-CimInstance Win32_Process -Filter "
-                 f"\"ProcessId={int(pid)}\").CommandLine"],
+                 f"$p = Get-CimInstance Win32_Process -Filter "
+                 f"\"ProcessId={int(pid)}\"; $p.ExecutablePath; "
+                 f"$p.CommandLine"],
                 capture_output=True, text=True, timeout=15,
                 **no_window_kwargs())
-            cmdline = (r.stdout or "").strip()
-            if cmdline:
-                return "main.py" in cmdline
+            lines = [ln.strip() for ln in
+                     (r.stdout or "").splitlines() if ln.strip()]
+            if len(lines) < 2:
+                return False
+            exe_name = lines[0].replace("\\", "/").rsplit("/", 1)[-1]
+            if exe_name.lower() not in ("python.exe", "pythonw.exe"):
+                return False
+            return "main.py" in " ".join(lines[1:])
         except Exception:
-            pass
-        return True
+            return False
     try:
         cmdline = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
         text = cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
         if "main.py" not in text:
             return False
-        try:
-            cwd = os.readlink(f"/proc/{int(pid)}/cwd")
-            if os.path.realpath(cwd) != os.path.realpath(str(root)):
-                return False
-        except Exception:
-            pass
-        return True
+        cwd = os.readlink(f"/proc/{int(pid)}/cwd")
+        return os.path.realpath(cwd) == os.path.realpath(str(root))
     except Exception:
-        return True
+        return False
 
 
 def terminate_process(pid, root: Path, alive=pid_alive,
@@ -349,12 +355,14 @@ def smoke_import(root: Path, rel_files, runner=subprocess.run):
 class Updater:
     def __init__(self, root=None, *, now=time.time, sleep=time.sleep,
                  alive=None, terminate=None, launch=None, smoke=None,
-                 self_exec=None, countdown_s=COUNTDOWN_S,
+                 matches=None, self_exec=None,
+                 countdown_s=COUNTDOWN_S,
                  health_grace_s=HEALTH_GRACE_S, poll_s=POLL_S):
         self.root = Path(root) if root else base_dir()
         self._now = now
         self._sleep = sleep
         self._alive = alive or pid_alive
+        self._matches = matches or pid_matches_app
         self._terminate = terminate or (
             lambda pid: terminate_process(pid, self.root,
                                           alive=self._alive,
@@ -502,21 +510,34 @@ class Updater:
 
     def app_pid(self):
         """Her pid, from the presence file (fresher) or the boot
-        stamp — and only when the process is alive AND verified as
-        this checkout's main.py where the platform can verify."""
+        stamp — and only when the process is alive AND positively
+        verified as this checkout's main.py. An unverifiable pid
+        counts as not-her: the kill gate fails closed."""
         for source in (self._presence(), self._stamp()):
             if not source:
                 continue
             pid = source.get("pid")
             if pid and self._alive(pid):
-                if pid_matches_app(pid, self.root):
+                if self._matches(pid, self.root):
                     return int(pid)
                 self._history(
                     "pid_mismatch",
-                    f"pid {pid} from her files is not this checkout's "
-                    f"main.py — not touching it")
+                    f"pid {pid} from her files could not be verified "
+                    f"as this checkout's main.py — not touching it")
                 return None
         return None
+
+    def _recorded_pid_alive(self) -> bool:
+        """Any pid her files name is still a live process —
+        distinguishes "she is not running" (launch is the fix)
+        from "she is running but unverifiable" (launching would
+        start a second copy; the restart must abort instead)."""
+        for source in (self._presence(), self._stamp()):
+            if source:
+                pid = source.get("pid")
+                if pid and self._alive(pid):
+                    return True
+        return False
 
     def hes_around(self) -> bool:
         """Awake, with a live session, recently — the announce-first
@@ -571,6 +592,25 @@ class Updater:
         running), relaunch, and require a fresh boot stamp naming
         expected_head within the grace window."""
         pid = self.app_pid()
+        if pid is None and self._recorded_pid_alive():
+            # She IS running — her files name a live pid — but it
+            # could not be positively verified as her. Killing on
+            # a guess is how the 2026-10-22 restart took the whole
+            # computer down, and relaunching would run two of her.
+            # Abort: the new code is on disk; a human restart picks
+            # it up. Announced, recorded, recoverable.
+            self._history(
+                "restart_aborted_unverified",
+                "recorded pid is alive but unverifiable as her "
+                "main.py — restart left to a human")
+            self.announce(
+                "I pulled the update and the code is on disk, but "
+                "I couldn't verify the running process is really "
+                "her, so I left her running rather than risk "
+                "stopping the wrong thing. Restart her yourself "
+                "when you're ready and she'll come up on the new "
+                "code.")
+            return "aborted"
         if pid is not None:
             if not self._terminate(pid):
                 self._history("terminate_failed",

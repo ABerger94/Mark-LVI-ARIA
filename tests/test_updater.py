@@ -352,7 +352,8 @@ def test_hold_file_alone_defers_even_unannounced(world):
 def test_restart_terminates_the_recorded_pid(world):
     advance_remote(world, {"core/mod.py": "X = 2\n"}, "new code")
     world.write_stamp(world.base, pid=987654)
-    u = make_updater(world, alive=lambda pid: pid == 987654)
+    u = make_updater(world, alive=lambda pid: pid == 987654,
+                     matches=lambda pid, root: True)
     assert u.poll_once() == "updated"
     assert u.terminated == [987654]
 
@@ -488,3 +489,79 @@ def test_no_window_kwargs_windows():
 
 def test_no_window_kwargs_posix():
     assert updater.no_window_kwargs("posix") == {}
+
+
+# ── the kill gate (2026-10-22 incident: an update restart took the
+# whole computer down — the recorded pid could not be verified as
+# hers, the old check trusted it anyway, and the force-kill landed
+# on a process the OS could not live without) ─────────────────────
+
+class _Cim:
+    def __init__(self, stdout):
+        self.stdout = stdout
+        self.returncode = 0
+
+
+def test_pid_gate_accepts_python_running_main_py(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    def runner(argv, **kw):
+        return _Cim("C:\\Python312\\pythonw.exe\n"
+                    "\"C:\\Python312\\pythonw.exe\" E:\\ARIA\\main.py\n")
+    assert updater.pid_matches_app(4321, Path("E:/ARIA"),
+                                   runner=runner) is True
+
+
+def test_pid_gate_rejects_unanswerable_query(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    def runner(argv, **kw):
+        return _Cim("")            # CIM discloses nothing
+    assert updater.pid_matches_app(4321, Path("E:/ARIA"),
+                                   runner=runner) is False
+
+
+def test_pid_gate_rejects_non_python_process(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    def runner(argv, **kw):
+        return _Cim("C:\\Windows\\System32\\csrss.exe\n"
+                    "csrss.exe main.py\n")
+    assert updater.pid_matches_app(4321, Path("E:/ARIA"),
+                                   runner=runner) is False
+
+
+def test_pid_gate_rejects_python_without_main_py(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    def runner(argv, **kw):
+        return _Cim("C:\\Python312\\python.exe\n"
+                    "\"python.exe\" other_app.py\n")
+    assert updater.pid_matches_app(4321, Path("E:/ARIA"),
+                                   runner=runner) is False
+
+
+def test_pid_gate_rejects_when_the_query_itself_fails(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    def runner(argv, **kw):
+        raise OSError("powershell gone")
+    assert updater.pid_matches_app(4321, Path("E:/ARIA"),
+                                   runner=runner) is False
+
+
+def test_pid_gate_posix_rejects_a_process_that_is_not_her():
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert updater.pid_matches_app(sleeper.pid, Path("/tmp")) \
+            is False
+    finally:
+        sleeper.kill()
+
+
+def test_unverified_live_pid_aborts_without_killing_or_relaunching(
+        world):
+    advance_remote(world, {"core/mod.py": "X = 2\n"}, "new code")
+    world.write_stamp(world.base, pid=987654)
+    u = make_updater(world, alive=lambda pid: pid == 987654,
+                     matches=lambda pid, root: False)
+    assert u.poll_once() == "restart_aborted"
+    assert u.terminated == []
+    assert u.launches == []
+    assert any("left her running" in t for t in drop_texts(world))
