@@ -86,6 +86,7 @@ from core                      import routines as routines_core
 from core                      import scheduler as scheduler_core
 from core                      import diagnostics as diagnostics_core
 from core                      import watchdog as watchdog_core
+from core                      import delegation as delegation_core
 from core.selfedit             import SelfEditWatcher
 from types                     import SimpleNamespace
 from core                      import audio_devices
@@ -874,6 +875,110 @@ class JarvisLive:
         response = future.result(timeout=600)
         payload = getattr(response, "response", None) or {}
         return str(payload.get("result", "Done."))
+
+    # ── Delegated background tasks (core/delegation.py) ──────────────
+
+    # Tool names never offered to a delegated task's model — the rule
+    # and its reasons live in core/delegation.py's docstring.
+    _DELEGATED_EXCLUDE = frozenset({
+        "delegate_task", "shutdown_jarvis", "run_routine",
+        "edit_own_code", "patch_own_code",
+    })
+
+    def _execute_delegated_step(self, name: str, args: dict) -> str:
+        """The delegation executor, bound in run() (core/delegation.py).
+
+        A delegated task's tool call goes through _execute_tool
+        itself — a throwaway call object in, the FunctionResponse's
+        result text out — so it receives the inline branches, the
+        confirmation gate and the outcome text exactly as a spoken
+        call does. Invoked from a delegation worker thread; the
+        coroutine is scheduled onto the session loop and waited on,
+        the routines executor's shape (with which it shares the
+        funnel, deliberately)."""
+        if self._loop is None:
+            raise RuntimeError("the session loop is not running")
+        fc = SimpleNamespace(id=f"task-{name}", name=name,
+                             args=dict(args or {}))
+        future = asyncio.run_coroutine_threadsafe(
+            self._execute_tool(fc), self._loop)
+        response = future.result(timeout=600)
+        payload = getattr(response, "response", None) or {}
+        return str(payload.get("result", "Done."))
+
+    def _delegated_tool_declarations(self) -> list[dict]:
+        """The declarations a delegated task's model may call: the
+        conversation's own three registries, minus the exclusions,
+        with the bookkeeping keys stripped — the same list the
+        Commands screen is built from, so what she can be asked to
+        do in the background is what the screen says she can do."""
+        decls = (list(TOOL_DECLARATIONS)
+                 + self._action_registry.get_tool_declarations()
+                 + self._plugin_registry.get_tool_declarations())
+        kept = [d for d in decls
+                if d.get("name") not in self._DELEGATED_EXCLUDE]
+        return strip_meta(kept)
+
+    def _delegated_model_turn(self, messages, tool_decls):
+        """One model turn for a delegated task (core/delegation.py's
+        call_model seam), over core/gemini's one-shot ladder: the
+        plain message protocol becomes genai contents, the tool
+        declarations ride in the call's config, and the reply's
+        text + function calls come back in the same plain shape.
+        Runs on a delegation worker thread; gemini.call is a
+        blocking one-shot, which is what a worker is for. NOTE:
+        a PROVIDER rung answers text-only in this app (its bridge
+        carries no tools), so on such a rung a delegated task
+        answers from its prompt alone — a limit of the bridge,
+        stated here rather than discovered mid-task."""
+        from google.genai import types as _gtypes
+        contents = []
+        for m in messages:
+            role = m.get("role")
+            if role == "user":
+                contents.append(_gtypes.Content(
+                    role="user",
+                    parts=[_gtypes.Part(text=m.get("text", ""))]))
+            elif role == "model":
+                parts = []
+                if m.get("text"):
+                    parts.append(_gtypes.Part(text=m["text"]))
+                for c in m.get("calls") or []:
+                    parts.append(_gtypes.Part(function_call=
+                        _gtypes.FunctionCall(
+                            name=c["name"], args=c.get("args") or {})))
+                contents.append(_gtypes.Content(role="model",
+                                                parts=parts))
+            elif role == "tool":
+                parts = [_gtypes.Part(function_response=
+                    _gtypes.FunctionResponse(
+                        name=r["name"],
+                        response={"result": r["result"]}))
+                    for r in m.get("results") or []]
+                contents.append(_gtypes.Content(role="user",
+                                                parts=parts))
+        config = _gtypes.GenerateContentConfig(
+            tools=[_gtypes.Tool(function_declarations=tool_decls)])
+        resp = _gemini.call(contents, tier=_gemini.SMART,
+                            config=config, timeout_ms=120_000)
+        if resp is None:
+            raise RuntimeError("no model answered — Gemini is "
+                               "unreachable or every rung is resting")
+        text, calls = "", []
+        try:
+            parts = resp.candidates[0].content.parts or []
+        except Exception:
+            parts = []
+        for part in parts:
+            if getattr(part, "text", None):
+                text += part.text
+            fc = getattr(part, "function_call", None)
+            if fc is not None and getattr(fc, "name", None):
+                calls.append({"name": fc.name,
+                              "args": dict(fc.args or {})})
+        if not calls and not text:
+            text = getattr(resp, "text", None) or ""
+        return text.strip(), calls
 
     # ── Wake word: state machine ─────────────────────────────────────────────
 
@@ -2926,6 +3031,17 @@ class JarvisLive:
                 asyncio.create_task(self._run_watchdog_heartbeat())
         except Exception as e:
             print(f"[Watchdog] ⚠️ not armed: {e}")
+
+        # Delegated background tasks (core/delegation.py): prompts
+        # the model works on without the conversation, through the
+        # same seam as everything else — the model turn over
+        # gemini's one-shot ladder, tool calls back through
+        # _execute_tool itself. Bound here so the store's stale
+        # records from any previous run are closed out at startup.
+        delegation_core.bind(
+            call_model=self._delegated_model_turn,
+            dispatch=self._execute_delegated_step,
+            tool_declarations=self._delegated_tool_declarations)
 
         # Content panel tabs (UI TABS): the Inbox and Calendar tabs
         # pull from the same Gmail / iCal sources the tools speak
