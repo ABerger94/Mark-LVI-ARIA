@@ -89,16 +89,16 @@ verified by size. A mirror that fails costs one incident, never the backup.
 
 ## Capabilities
 
-**88 tools** on a desktop install — 9 built in, 78 actions, plus
+**89 tools** on a desktop install — 9 built in, 79 actions, plus
 `youtube_video`, which only loads when a display is present. (A headless
-registry walk counts 87.) Tools from connected MCP servers join on top of
+registry walk counts 88.) Tools from connected MCP servers join on top of
 that, namespaced per server. The in-app **⌘ COMMANDS** overlay is the source
 of truth: it is rebuilt from the live registries every time it opens, so it
 cannot list a tool she doesn't have. The shape of the suite:
 
 | Area | What's there |
 |---|---|
-| Computer & files | `open_app`, `computer_control`, `computer_settings`, `desktop_control`, `file_controller`, `file_processor`, `file_duplicates`, `file_find_advanced`, `file_organize`, `code_helper`, `dev_agent` |
+| Computer & files | `open_app`, `computer_control`, `computer_settings`, `desktop_control`, `file_controller`, `file_processor`, `file_duplicates`, `file_find_advanced`, `file_organize`, `code_helper`, `dev_agent`, `run_shell_command` (a real terminal — every command shows verbatim on the HUD and runs only on CONFIRM, never inside a routine replay or a delegated task) |
 | Web & media | `web_search`, `browser_control`, `video_player`, `weather_report`, `flight_finder`, `game_updater` |
 | Spotify & DJ | `spotify` (now playing from the real window title, transport, per-app volume), `dj` (saved playlist → mood → labelled search, in that order — never an invented playlist), `save_playlist` (any Spotify link form, normalised and verified) |
 | Routines | `routine_record_start/stop`, `run_routine` (with `{{param}}` substitution), `list_routines`, `describe_routine`, `delete_routine`, `trust_routine`, `untrust_routine`, `export_routine_pack`, `import_routine_pack` |

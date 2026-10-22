@@ -55,7 +55,10 @@ itself (no recursion), shutdown_jarvis (a background task does
 not end the app), run_routine (a trusted routine's pre-answered
 gate is the user's answer for a replay THEY set going, not for a
 task the model started), or the self-edit tools (their restart
-belongs to the conversation's lifecycle, not a worker's).
+belongs to the conversation's lifecycle, not a worker's), or
+run_shell_command (a shell is arbitrary code: every command
+needs a live human at the banner, in the moment — a background
+task is neither).
 
 CONCURRENCY + CANCELLATION
     Two workers, at most MAX_ACTIVE (4) tasks in flight (running +

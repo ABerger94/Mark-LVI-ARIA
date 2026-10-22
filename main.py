@@ -890,7 +890,7 @@ class JarvisLive:
     # and its reasons live in core/delegation.py's docstring.
     _DELEGATED_EXCLUDE = frozenset({
         "delegate_task", "shutdown_jarvis", "run_routine",
-        "edit_own_code", "patch_own_code",
+        "edit_own_code", "patch_own_code", "run_shell_command",
     })
 
     def _execute_delegated_step(self, name: str, args: dict) -> str:
