@@ -5,7 +5,7 @@ your Windows PC, talks in real time, drives the computer by voice, and
 remembers what you tell her across sessions.
 
 ARIA is built on the **MARK LVI** codebase by **FatihMakes**. The engine,
-avatar, HUD and phone dashboard are his; the persona, connections, routines,
+avatar, most of the HUD and phone dashboard are there's; the persona, updated connections, routines,
 scheduler, memory hardening and the rest of what makes her *ARIA* were built
 on top in this fork by Alek Berger.
 
