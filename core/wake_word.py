@@ -32,27 +32,6 @@ DEFAULT_THRESHOLD = 0.5
 SAMPLE_RATE = 16000
 
 
-def initial_awake(wake_enabled: bool, first_session: bool,
-                  current_awake: bool) -> bool:
-    """Should she be awake when a session connects?
-
-    Pure decision, kept here so main.py's connect block stays a one-liner
-    and the rule is unit-testable:
-
-      * wake word OFF — always awake; the flag doesn't exist for her.
-      * wake word ON, first connect of the process — awake. She starts
-        the day listening (Alek's ruling), which is also what lets the
-        startup briefing's _awake gate pass at launch.
-      * wake word ON, a reconnect — preserve the current state, so an
-        auto-sleep (or a conversation in progress) survives a blip.
-    """
-    if not wake_enabled:
-        return True
-    if first_session:
-        return True
-    return bool(current_awake)
-
-
 def is_installed() -> bool:
     """True if the openwakeword package is importable (no model check)."""
     try:
