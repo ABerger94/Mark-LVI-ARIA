@@ -34,8 +34,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
-    QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-    QPolygonF, QRadialGradient, QShortcut, QTransform,
+    QKeySequence, QPainter, QPen, QPixmap, QRadialGradient, QShortcut,
 )
 # Video playback for the HUD. Part of PyQt6, so it costs no new dependency —
 # but the multimedia plugins are a separate piece of the Qt install and can be
@@ -445,13 +444,6 @@ class HudCanvas(QWidget):
         self._wave_rings: list = []
         self._wave_prev_amp = 0.0
 
-        # Jack-o'-lantern state (see _paint_pumpkin_core): the candle
-        # flicker is a clamped random walk, seeded like the neuron
-        # field and stepped in _step() for every style — never in
-        # paint — so the carved face's glow breathes continuously.
-        self._pumpkin_flicker = 0.92
-        self._pumpkin_rng = random.Random(20261031)
-
         self._tick       = 0
         self._scale      = 1.0
         self._tgt_scale  = 1.0
@@ -634,15 +626,6 @@ class HudCanvas(QWidget):
         self._wave_prev_amp = amp
         self._wave_rings = [s for s in self._wave_rings
                              if self._core_phase - s < 1.6]
-
-        # Jack-o'-lantern flicker (see _paint_pumpkin_core): advance
-        # the candle's random walk on the tick, clamped to the same
-        # 0.80–1.05 band the approved prototype used, so the glow
-        # breathes even between throttled repaints. Done for EVERY
-        # style, like the wave sampling above: switching to the
-        # pumpkin never starts from a frozen candle.
-        self._pumpkin_flicker += self._pumpkin_rng.uniform(-0.045, 0.045)
-        self._pumpkin_flicker = max(0.80, min(1.05, self._pumpkin_flicker))
 
         # The avatar animates off the very same smoothed level the waveform
         # uses — one audio source, so the mouth can never drift out of sync.
@@ -1256,360 +1239,6 @@ class HudCanvas(QWidget):
             p.drawText(QRectF(cx - r, cy - fsz, r * 2, fsz * 2),
                        Qt.AlignmentFlag.AlignCenter, name)
 
-    def _paint_pumpkin_core(self, p: QPainter, cx: float, cy: float, r: float,
-                            W: float = 0.0, H: float = 0.0):
-        """Draw the jack-o'-lantern at (cx, cy), sized to radius r — the
-        fourth centrepiece, approved by Alek 2026-10-22 from a rendered
-        prototype (lvi-build/pumpkin_preview.py) and ported from it.
-
-        A carved pumpkin in the same band the head and the cores occupy:
-        a ribbed, sphere-shaded body (polar-sampled silhouette, seven
-        lobe grooves, a radial gradient keyed upper-left, groove
-        shadows and ridge highlights clipped inside it, rim shadow,
-        specular bloom, and a ridged stem the body overlaps) and a
-        carved face — slanted triangular eyes, a small triangular nose,
-        a wide grin with teeth — filled with a candle gradient
-        (near-white core through gold to deep orange) and haloed in two
-        passes so the light spills onto the rind around each cutout.
-
-        DATA, honestly: like the waveform core, the canvas has no PCM —
-        only the smoothed level (_amp_disp). Speech moves the grin the
-        way the prototype's synthesized envelope did: the mouth's lower
-        edge and lower teeth drop with the jaw-open amount derived from
-        _amp_disp, and an extra inner blaze fades in as the jaw opens;
-        idle, the grin settles closed. The candle flicker is STATE, not
-        paint noise: a clamped random walk (0.80–1.05), seeded like the
-        neuron field and advanced in _step() for every style, with a
-        breath of sine over the integrated phase added here — so a
-        throttled repaint can never strobe it and paint stays a pure
-        function of state.
-        """
-        main = self._core_colours()[0]
-        bg = qcol(C.BG)
-        amp = self._amp_disp
-        o = max(0.0, min(1.0, (amp - 0.06) / 0.80))          # jaw open
-        flicker = self._pumpkin_flicker \
-            + 0.04 * math.sin(2 * math.pi * 0.7 * self._core_phase)
-        inten = flicker * (0.82 + 0.45 * amp)                # glow drive
-
-        # Prototype geometry: the pumpkin lived at radii 258×220 in a
-        # 1280×720 frame, centred a touch low for stem headroom. s maps
-        # those units onto this band: r covers the whole pumpkin (stem
-        # top to ground shadow) with margin, capped by canvas width.
-        s = r / 300.0
-        if W > 0:
-            s = min(s, W * 0.44 / 258.0)
-        rx, ry = 258.0 * s, 220.0 * s
-        py = cy + 32.0 * s
-        top = py - ry
-        lobes = 7
-
-        def pw(w: float) -> float:
-            return max(0.8, w * s)
-
-        def blend(col: QColor, a: float) -> QColor:
-            k = max(0.0, min(1.0, a))
-            return QColor(int(bg.red()   + (col.red()   - bg.red())   * k),
-                          int(bg.green() + (col.green() - bg.green()) * k),
-                          int(bg.blue()  + (col.blue()  - bg.blue())  * k))
-
-        def rgba(hexcol: str, a: float) -> QColor:
-            c = QColor(hexcol)
-            c.setAlphaF(max(0.0, min(1.0, a)))
-            return c
-
-        def pt(lx: float, ly: float) -> QPointF:
-            """Pumpkin-local coords (units of rx/ry) -> canvas point."""
-            return QPointF(cx + lx * rx, py + ly * ry)
-
-        def silhouette() -> QPainterPath:
-            """Ribbed outline: the radius ripples at the lobe grooves,
-            the ripple fading toward the poles where grooves converge."""
-            path = QPainterPath()
-            n = 360
-            for i in range(n + 1):
-                th = 2 * math.pi * i / n
-                sx = math.cos(th)                    # horizontal fraction
-                groove = 0.5 - 0.5 * math.cos(math.pi * lobes * sx)
-                w = abs(math.sin(th)) ** 0.7
-                scale = 1.0 - 0.045 * (1.0 - groove) * w
-                scale *= 1.0 + 0.018 * max(0.0, math.sin(th))
-                x = cx + rx * scale * math.cos(th)
-                y = py + ry * scale * math.sin(th)
-                if i == 0:
-                    path.moveTo(x, y)
-                else:
-                    path.lineTo(x, y)
-            path.closeSubpath()
-            return path
-
-        def rib_curve(s_frac: float) -> QPolygonF:
-            """A vertical rib line (groove or ridge), pole to pole."""
-            pts = []
-            for i in range(41):
-                v = -1.0 + 2.0 * i / 40              # vertical fraction
-                x = cx + s_frac * rx * math.sqrt(max(0.0, 1 - v * v)) * 0.985
-                pts.append(QPointF(x, py + v * ry * 0.985))
-            return QPolygonF(pts)
-
-        def stem() -> QPainterPath:
-            q = QPainterPath()
-            q.moveTo(cx - 34 * s, top + 14 * s)
-            q.cubicTo(cx - 30 * s, top - 26 * s, cx - 18 * s, top - 44 * s,
-                      cx - 2 * s, top - 54 * s)
-            q.cubicTo(cx + 10 * s, top - 60 * s, cx + 24 * s, top - 56 * s,
-                      cx + 27 * s, top - 44 * s)
-            q.cubicTo(cx + 30 * s, top - 26 * s, cx + 33 * s, top - 4 * s,
-                      cx + 36 * s, top + 14 * s)
-            q.cubicTo(cx + 12 * s, top + 4 * s, cx - 12 * s, top + 4 * s,
-                      cx - 34 * s, top + 14 * s)
-            q.closeSubpath()
-            return q
-
-        def eye(side: float) -> QPainterPath:
-            """Triangular eye, apex up, outer corner dropped —
-            charming-menacing."""
-            m = float(side)                          # -1 left, +1 right
-            path = QPainterPath()
-            path.addPolygon(QPolygonF([pt(m * 0.335, -0.375),
-                                       pt(m * 0.545, -0.105),
-                                       pt(m * 0.175, -0.140)]))
-            path.closeSubpath()
-            return path
-
-        def nose() -> QPainterPath:
-            path = QPainterPath()
-            path.addPolygon(QPolygonF([pt(0.0, -0.075), pt(0.095, 0.095),
-                                       pt(-0.095, 0.095)]))
-            path.closeSubpath()
-            return path
-
-        def mouth() -> QPainterPath:
-            """Wide jagged grin. Upper teeth hang from the top edge
-            (fixed); the bottom edge — with two small lower teeth —
-            drops with the jaw-open amount o."""
-            X0, X1 = -0.66, 0.66
-            upper_teeth = [(-0.44, 0.075, 0.105), (-0.15, 0.075, 0.115),
-                           (0.15, 0.075, 0.115), (0.44, 0.075, 0.105)]
-            lower_teeth = [(-0.28, 0.058, 0.055), (0.28, 0.058, 0.055)]
-
-            def y_top(lx: float) -> float:
-                y = 0.175 + 0.055 * (1.0 - (lx / X1) ** 2)
-                for tc, hw, depth in upper_teeth:
-                    d = abs(lx - tc)
-                    if d < hw:
-                        y += depth * (1.0 - d / hw)
-                return y
-
-            def y_bot(lx: float) -> float:
-                h = (0.135 + 0.30 * o) * (0.80 + 0.35 * (1.0 - (lx / X1) ** 2))
-                y = 0.175 + 0.055 * (1.0 - (lx / X1) ** 2) + h
-                for tc, hw, depth in lower_teeth:
-                    d = abs(lx - tc)
-                    if d < hw:
-                        y -= depth * (1.0 - d / hw) * (0.4 + 0.6 * o)
-                return y
-
-            path = QPainterPath()
-            step = 0.005
-            n = int(round((X1 - X0) / step))
-            path.moveTo(pt(X0, y_top(X0)))
-            for i in range(1, n + 1):
-                lx = X0 + i * step
-                path.lineTo(pt(lx, y_top(lx)))
-            for i in range(n, -1, -1):
-                lx = X0 + i * step
-                path.lineTo(pt(lx, y_bot(lx)))
-            path.closeSubpath()
-            return path
-
-        def glow_spill(path, fx, fy, rad):
-            """Soft halo of candlelight spilling onto the rind around a
-            cutout: the cutout path scaled up, clipped, filled with a
-            radial gradient — two passes, as the prototype drew it."""
-            for scale_f, a in ((1.5, 0.16), (1.25, 0.22)):
-                tr = (QTransform().translate(fx, fy).scale(scale_f, scale_f)
-                      .translate(-fx, -fy))
-                p.save()
-                p.setClipPath(tr.map(path))
-                g = QRadialGradient(fx, fy, rad * scale_f)
-                g.setColorAt(0.0, rgba("#ff9a1f", a * inten))
-                g.setColorAt(1.0, rgba("#ff9a1f", 0.0))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(g))
-                p.drawRect(QRectF(fx - rad * scale_f, fy - rad * scale_f,
-                                  2 * rad * scale_f, 2 * rad * scale_f))
-                p.restore()
-
-        def glow_fill(path, fx, fy, rad):
-            """The cutout itself: bright candle core fading to deep
-            orange edges, with a carved-wall shadow for rind thickness."""
-            g = QRadialGradient(fx, fy - rad * 0.15, rad)
-            g.setColorAt(0.00, rgba("#fff6c4", 1.0))
-            g.setColorAt(0.35, rgba("#ffd23e", 0.98))
-            g.setColorAt(0.75, rgba("#ff8b1a", 0.97))
-            g.setColorAt(1.00, rgba("#e85d04", 0.97))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(g))
-            p.drawPath(path)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(rgba("#5c1f00", 0.45), pw(3.0)))
-            p.drawPath(path)
-            # extra hot core, scaled by flicker/level
-            g2 = QRadialGradient(fx, fy, rad * 0.5)
-            g2.setColorAt(0.0, rgba("#fffbe8", 0.55 * inten))
-            g2.setColorAt(1.0, rgba("#fffbe8", 0.0))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(g2))
-            p.drawPath(path)
-
-        # 1. Two faint rings around the pumpkin, as the prototype
-        #    framed it — in the state colour, so the frame still
-        #    reports what she is doing.
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        for rr, a in ((300.0, 0.15), (279.0, 0.08)):
-            rad = rr * s
-            p.setPen(QPen(blend(main, a), pw(1.0)))
-            p.drawEllipse(QRectF(cx - rad, py - rad, 2 * rad, 2 * rad))
-
-        # 2. Ground shadow, then a warm pool of candlelight under it.
-        for i, (wd, a) in enumerate(((500, 0.50), (430, 0.38), (360, 0.30))):
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(rgba("#000000", a))
-            p.drawEllipse(QRectF(cx - wd * s / 2, py + ry * 0.90,
-                                 wd * s, (46 - i * 6) * s))
-        g = QRadialGradient(cx, py + ry * 0.95, 260 * s)
-        g.setColorAt(0.0, rgba("#ff8b1a", 0.13 * inten))
-        g.setColorAt(1.0, rgba("#ff8b1a", 0.0))
-        p.setBrush(QBrush(g))
-        p.drawEllipse(QRectF(cx - 260 * s, py + ry * 0.95 - 60 * s,
-                             520 * s, 120 * s))
-
-        # 3. Halo behind the pumpkin, breathing with the candle.
-        g = QRadialGradient(cx, py, rx * 1.45)
-        g.setColorAt(0.0, rgba("#ff8b1a", 0.10 * inten))
-        g.setColorAt(0.7, rgba("#ff8b1a", 0.05 * inten))
-        g.setColorAt(1.0, rgba("#ff8b1a", 0.0))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(g))
-        p.drawEllipse(QRectF(cx - rx * 1.45, py - rx * 1.45,
-                             2 * rx * 1.45, 2 * rx * 1.45))
-
-        sil = silhouette()
-
-        # 4. Stem first — the body overlaps its base, which sells the
-        #    depth — with its ridge lines and a highlight stroke.
-        sg = QLinearGradient(0, top - 60 * s, 0, top + 16 * s)
-        sg.setColorAt(0.0, QColor("#77873a"))
-        sg.setColorAt(0.5, QColor("#55611f"))
-        sg.setColorAt(1.0, QColor("#2f3a10"))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(sg))
-        p.drawPath(stem())
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        for dx, a in ((-14, 0.35), (0, 0.45), (14, 0.35)):
-            ridge = QPainterPath()
-            ridge.moveTo(cx + dx * s, top + 10 * s)
-            ridge.cubicTo(cx + dx * s - 2 * s, top - 24 * s,
-                          cx + dx * s + 3 * s, top - 42 * s,
-                          cx + dx * s + 7 * s, top - 50 * s)
-            p.setPen(QPen(rgba("#1e2708", a), pw(2.4)))
-            p.drawPath(ridge)
-        hl = QPainterPath()
-        hl.moveTo(cx - 24 * s, top + 6 * s)
-        hl.cubicTo(cx - 22 * s, top - 22 * s, cx - 14 * s, top - 40 * s,
-                   cx - 4 * s, top - 50 * s)
-        p.setPen(QPen(rgba("#a8bf62", 0.55), pw(2.0)))
-        p.drawPath(hl)
-
-        # 5. The body: radial gradient, key light upper-left, deep
-        #    falloff at the edges.
-        g = QRadialGradient(cx - rx * 0.38, py - ry * 0.42, rx * 1.55)
-        g.setColorAt(0.00, QColor("#ffb347"))
-        g.setColorAt(0.35, QColor("#f5821f"))
-        g.setColorAt(0.72, QColor("#d95f06"))
-        g.setColorAt(1.00, QColor("#8a3402"))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(g))
-        p.drawPath(sil)
-
-        p.save()
-        p.setClipPath(sil)
-        # groove shadows (between the lobes)
-        for sf in [k / lobes for k in (-5, -3, -1, 1, 3, 5)]:
-            curve = rib_curve(sf)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(rgba("#571f00", 0.20), pw(17),
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawPolyline(curve)
-            p.setPen(QPen(rgba("#571f00", 0.20), pw(7),
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawPolyline(curve)
-        # ridge highlights, nudged toward the key light (left)
-        tr = QTransform().translate(-7 * s, -3 * s)
-        for sf in [k / lobes for k in (-6, -4, -2, 0, 2, 4, 6)]:
-            p.setPen(QPen(rgba("#ffc46b", 0.13), pw(24),
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawPolyline(tr.map(rib_curve(sf)))
-        # candlelight wash across the face — the whole front breathes
-        g = QRadialGradient(cx, py + 10 * s, rx * 0.95)
-        g.setColorAt(0.0, rgba("#ffab2e", 0.16 * inten))
-        g.setColorAt(1.0, rgba("#ffab2e", 0.0))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(g))
-        p.drawRect(QRectF(cx - rx, py - ry, 2 * rx, 2 * ry))
-        # inner edge shadow — sphere falloff at rim and bottom
-        g = QRadialGradient(cx, py, rx * 1.02)
-        g.setColorAt(0.68, rgba("#3d1500", 0.0))
-        g.setColorAt(0.92, rgba("#3d1500", 0.28))
-        g.setColorAt(1.00, rgba("#2a0e00", 0.45))
-        p.setBrush(QBrush(g))
-        p.drawRect(QRectF(cx - rx * 1.05, py - ry * 1.05,
-                          2 * rx * 1.05, 2 * ry * 1.05))
-        # specular bloom upper-left
-        g = QRadialGradient(cx - rx * 0.42, py - ry * 0.48, rx * 0.55)
-        g.setColorAt(0.0, rgba("#fff1cf", 0.20))
-        g.setColorAt(1.0, rgba("#fff1cf", 0.0))
-        p.setBrush(QBrush(g))
-        p.drawRect(QRectF(cx - rx, py - ry, 2 * rx, 2 * ry))
-        # stem-base shadow where it meets the rind
-        p.setBrush(rgba("#571f00", 0.35))
-        p.drawEllipse(QRectF(cx - 44 * s, top - 2 * s, 88 * s, 16 * s))
-        p.restore()
-
-        # 6. Rim light.
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(rgba("#ffb066", 0.14), pw(7)))
-        p.drawPath(sil)
-        p.setPen(QPen(rgba("#ffb066", 0.5), pw(2)))
-        p.drawPath(sil)
-
-        # 7. The carved face: glow spill first (clipped to the rind),
-        #    then the glowing cutouts themselves.
-        o_m = mouth()
-        feats = [(eye(-1), cx - 0.36 * rx, py - 0.21 * ry, 62 * s),
-                 (eye(+1), cx + 0.36 * rx, py - 0.21 * ry, 62 * s),
-                 (nose(), cx, py + 0.01 * ry, 34 * s),
-                 (o_m, cx, py + 0.33 * ry + o * 16 * s, 165 * s)]
-        p.save()
-        p.setClipPath(sil)
-        for path, fx, fy, rad in feats:
-            glow_spill(path, fx, fy, rad)
-        p.restore()
-        for path, fx, fy, rad in feats:
-            glow_fill(path, fx, fy, rad)
-        # the mouth gets an extra inner blaze when the jaw is open
-        if o > 0.03:
-            g = QRadialGradient(cx, py + 0.34 * ry, 120 * s)
-            g.setColorAt(0.0, rgba("#fffbe8", 0.50 * o * flicker))
-            g.setColorAt(1.0, rgba("#fffbe8", 0.0))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(g))
-            p.save()
-            p.setClipPath(o_m)
-            p.drawRect(QRectF(cx - 170 * s, py, 340 * s, 190 * s))
-            p.restore()
-
     def paintEvent(self, _):
         p = QPainter(self)
         if not p.isActive():      # device not ready (e.g. 0-size during layout) — skip cleanly
@@ -1671,16 +1300,6 @@ class HudCanvas(QWidget):
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
             _r = min(W * 0.46, _band_h / 2.0)
             self._paint_wave_core(p, cx, _band_t + _band_h / 2.0, _r, W, _band_h)
-
-        # jack-o'-lantern — the fourth centrepiece: a carved pumpkin
-        # lit from inside, its grin opening with the voice (see
-        # _paint_pumpkin_core). Same band geometry as the wave's, so
-        # the status line and the strip below never move.
-        elif self.hud_style == "pumpkin":
-            _band_t = 12.0
-            _band_h = max(60.0, _sy_status - 12.0 - _band_t)
-            _r = min(W * 0.46, _band_h / 2.0)
-            self._paint_pumpkin_core(p, cx, _band_t + _band_h / 2.0, _r, W, _band_h)
 
         # reactor core — the second centrepiece, and the fallback if the
         # head could not be built. The old face.png branch was unreachable
@@ -7794,7 +7413,7 @@ class MainWindow(QMainWindow):
     def _refresh_hud_btn(self):
         from memory.config_manager import get_hud_style
         cur = get_hud_style()
-        # No state is "off", so all four read as active — this is a choice
+        # No state is "off", so all three read as active — this is a choice
         # between centrepieces, not a switch with a disabled side. Each
         # tooltip names the NEXT style, because the button cycles.
         style = f"""
@@ -7812,10 +7431,6 @@ class MainWindow(QMainWindow):
             "wave": ("∿  HUD: WAVEFORM CORE",
                      "The reactor drawn as her voice — a living waveform "
                      "ribbon that moves with the sound. Tap to switch to "
-                     "the jack-o'-lantern."),
-            "pumpkin": ("🎃  HUD: JACK-O'-LANTERN",
-                     "A carved pumpkin that glows like candlelight "
-                     "and grins along as she speaks. Tap to switch to "
                      "the animated head."),
         }
         text, tip = labels.get(cur, labels["face"])
@@ -7824,9 +7439,8 @@ class MainWindow(QMainWindow):
         self._hud_btn.setToolTip(tip)
 
     def _toggle_hud_style(self):
-        """Cycle the centrepiece: face → core → wave → pumpkin → face.
-        All four stay in memory, so the change is instant and switching
-        costs nothing."""
+        """Cycle the centrepiece: face → core → wave → face. All three stay
+        in memory, so the change is instant and switching costs nothing."""
         from memory.config_manager import (HUD_STYLES, get_hud_style,
                                            save_hud_style)
         cur = get_hud_style()
@@ -7843,7 +7457,6 @@ class MainWindow(QMainWindow):
             "face": "SYS: HUD switched to the animated face.",
             "core": "SYS: HUD switched to the reactor core.",
             "wave": "SYS: HUD switched to the waveform core.",
-            "pumpkin": "SYS: HUD switched to the jack-o'-lantern.",
         }[want])
 
     def _toggle_ptt(self):

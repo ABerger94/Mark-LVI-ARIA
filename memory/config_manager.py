@@ -283,14 +283,14 @@ def save_push_to_talk_enabled(enabled: bool) -> None:
     _save_flag("push_to_talk_enabled", enabled)
 
 
-HUD_STYLES = ("face", "core", "wave", "pumpkin")
+HUD_STYLES = ("face", "core", "wave")
 
 
 def get_hud_style() -> str:
     """Which centrepiece the HUD draws: the animated head, the reactor core,
-    the waveform core, or the jack-o'-lantern.
+    or the waveform core.
 
-    Taste, not capability — all four render in the same software painter and cost
+    Taste, not capability — both render in the same software painter and cost
     about the same. Defaults to the head because that is what MARK LIV shipped
     with; anyone who preferred the older look can switch back in ⚙ and the
     choice survives a restart.

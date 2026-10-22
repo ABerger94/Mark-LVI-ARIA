@@ -3,8 +3,8 @@ the third HUD style alongside the animated face and the reactor core.
 
 What is pinned here, headlessly: "wave" is a valid persisted style
 and invalid values still fall back to "face"; the Controls button
-cycles face → core → wave → pumpkin → face, persisting each stop and
-labelling the button for it; the canvas samples its smoothed level into a
+cycles face → core → wave → face, persisting each stop and labelling
+the button for it; the canvas samples its smoothed level into a
 capped rolling history every tick; emission rings spawn once per
 upward 0.72 crossing, stay capped, and expire by phase age; and
 _paint_wave_core / full paintEvent draw without error on an empty
@@ -49,7 +49,7 @@ def _drive_loud(c, ticks=8):
 # ── Config ─────────────────────────────────────────────────────────────
 
 def test_wave_style_roundtrips_and_invalid_falls_back(cfg):
-    assert cm.HUD_STYLES == ("face", "core", "wave", "pumpkin")
+    assert cm.HUD_STYLES == ("face", "core", "wave")
     assert cm.get_hud_style() == "face"            # untouched config
     cm.save_hud_style("wave")
     assert cm.get_hud_style() == "wave"
@@ -65,7 +65,7 @@ def test_wave_style_roundtrips_and_invalid_falls_back(cfg):
     assert cm.get_hud_style() == "face"
 
 
-# ── The Controls button cycles all four ──────────────────────────────
+# ── The Controls button cycles all three ───────────────────────────────
 
 class _Btn:
     def __init__(self):
@@ -109,23 +109,21 @@ def _bare_window():
     return win
 
 
-def test_toggle_cycles_face_core_wave_pumpkin_face(cfg):
+def test_toggle_cycles_face_core_wave_face(cfg):
     cm.save_hud_style("face")
     win = _bare_window()
     seen = []
-    for _ in range(5):
+    for _ in range(4):
         win._toggle_hud_style()
         seen.append((cm.get_hud_style(), win.hud.hud_style, win._hud_btn.text))
-    assert [s[0] for s in seen] == ["core", "wave", "pumpkin", "face", "core"]
-    assert [s[1] for s in seen] == ["core", "wave", "pumpkin", "face", "core"]
+    assert [s[0] for s in seen] == ["core", "wave", "face", "core"]
+    assert [s[1] for s in seen] == ["core", "wave", "face", "core"]
     assert "REACTOR CORE" in seen[0][2]
     assert "WAVEFORM CORE" in seen[1][2]
-    assert "JACK-O'-LANTERN" in seen[2][2]
-    assert "ANIMATED FACE" in seen[3][2]
+    assert "ANIMATED FACE" in seen[2][2]
     assert win._log.lines == [
         "SYS: HUD switched to the reactor core.",
         "SYS: HUD switched to the waveform core.",
-        "SYS: HUD switched to the jack-o'-lantern.",
         "SYS: HUD switched to the animated face.",
         "SYS: HUD switched to the reactor core.",
     ]
@@ -136,7 +134,7 @@ def test_refresh_button_labels_wave_and_names_next(cfg):
     win = _bare_window()
     win._refresh_hud_btn()
     assert "WAVEFORM CORE" in win._hud_btn.text
-    assert "jack-o'-lantern" in win._hud_btn.tip    # next in cycle is pumpkin
+    assert "animated head" in win._hud_btn.tip      # next in cycle is face
     cm.save_hud_style("core")
     win._refresh_hud_btn()
     assert "REACTOR CORE" in win._hud_btn.text
