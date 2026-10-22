@@ -94,10 +94,11 @@ EXAMPLE_PHRASES = {
     "run_diagnostics":      "Run diagnostics — is everything working?",
 }
 
-_SOURCE_ORDER = ("Built-in", "Action", "Plugin")
+_SOURCE_ORDER = ("Built-in", "Action", "Plugin", "MCP")
 
 
-def build_command_list(inline_decls, action_decls, plugin_decls) -> list[dict]:
+def build_command_list(inline_decls, action_decls, plugin_decls,
+                       mcp_decls=None) -> list[dict]:
     """Merge the three declaration lists into Commands-screen rows.
 
     Each row: {"name", "description", "source", "example"}. On a name
@@ -110,7 +111,8 @@ def build_command_list(inline_decls, action_decls, plugin_decls) -> list[dict]:
     rows = {}
     for source, decls in (("Built-in", inline_decls),
                           ("Action", action_decls),
-                          ("Plugin", plugin_decls)):
+                          ("Plugin", plugin_decls),
+                          ("MCP", mcp_decls)):
         for decl in decls or []:
             name = decl.get("name")
             if not name or name in rows:

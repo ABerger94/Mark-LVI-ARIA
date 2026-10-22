@@ -103,6 +103,14 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 #                            #   (also needs ffmpeg on PATH for most formats)
 #   pip install mediapipe    # pushup_counter: elbow-angle rep detection
 
+# ── MCP client (core/mcp_client.py) ────────────────────────────────────────
+# The Model Context Protocol SDK: tools from servers the user configures
+# (stdio commands or HTTP URLs) join her tool list, namespaced per server.
+# core/mcp_client.py imports it LAZILY, at connect time only — delete this
+# line and the app runs exactly as before, with the MCP tools answering
+# "MCP support is not installed" instead of failing anything.
+mcp>=1.2,<2
+
 # ── Optional: running the assistant on your own models ───────────────────────
 # ⚙ → ENGINE & PROVIDERS lets you replace Gemini Live with your own speech
 # recognition, language model and voice — or point only the assistant's

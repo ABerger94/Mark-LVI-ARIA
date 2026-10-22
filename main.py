@@ -87,6 +87,7 @@ from core                      import scheduler as scheduler_core
 from core                      import diagnostics as diagnostics_core
 from core                      import watchdog as watchdog_core
 from core                      import delegation as delegation_core
+from core                      import mcp_client as mcp_client_core
 from core.selfedit             import SelfEditWatcher
 from types                     import SimpleNamespace
 from core                      import audio_devices
@@ -803,6 +804,7 @@ class JarvisLive:
             TOOL_DECLARATIONS,
             self._action_registry.get_tool_declarations(),
             self._plugin_registry.get_tool_declarations(),
+            mcp_client_core.declarations(),
         )
 
     def _diagnostics_for_ui(self) -> None:
@@ -853,7 +855,8 @@ class JarvisLive:
         return ({t["name"] for t in TOOL_DECLARATIONS}
                 | self._action_registry.names()
                 | {d["name"] for d in
-                   self._plugin_registry.get_tool_declarations()})
+                   self._plugin_registry.get_tool_declarations()}
+                | mcp_client_core.tool_names())
 
     def _execute_routine_step(self, name: str, args: dict) -> str:
         """The routines executor, bound in run() (core/routines.py).
@@ -1515,7 +1518,8 @@ class JarvisLive:
         # and this follows without anyone editing a prompt.
         _all_decls = (TOOL_DECLARATIONS
                       + self._action_registry.get_tool_declarations()
-                      + self._plugin_registry.get_tool_declarations())
+                      + self._plugin_registry.get_tool_declarations()
+                      + mcp_client_core.declarations())
 
         # An engine that cannot do something is not offered the tool for it.
         #
@@ -1823,6 +1827,16 @@ class JarvisLive:
                     r = await loop.run_in_executor(
                         None,
                         lambda: self._plugin_registry.run(name, args, player=self.ui, session_memory=None)
+                    )
+                    result = r or "Done."
+                elif mcp_client_core.has_tool(name):
+                    # MCP (core/mcp_client.py): a connected server's
+                    # tool, namespaced mcp_<server>_<tool>. The call
+                    # blocks on the server's own loop thread, so it
+                    # runs on the executor like every other registry.
+                    r = await loop.run_in_executor(
+                        None,
+                        lambda: mcp_client_core.run_tool(name, args)
                     )
                     result = r or "Done."
                 else:

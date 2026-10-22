@@ -484,6 +484,46 @@ def save_watchdog_enabled(enabled: bool) -> None:
 # may be an unmounted drive's — the mirror copy itself reports
 # failure (once, as an incident) when the folder cannot be used.
 
+# ── MCP servers ────────────────────────────────────────────────────────
+# Model Context Protocol servers the user has configured
+# (core/mcp_client.py): {name: spec} where a spec is either
+# {"command": str, "args": [str, ...]} for a stdio server — a
+# child process of this app — or {"url": str} for a streamable-
+# HTTP server. Specs are data until mcp_connect launches one;
+# storing a spec never runs anything (the launch is its own,
+# confirm-gated act — see actions/mcp_connect.py).
+
+def get_mcp_servers() -> dict:
+    """All configured MCP servers: {name: spec}. Specs that are
+    not dicts are dropped on read — a hand-edited wreck in this
+    one key must not take the whole map down with it."""
+    raw = load_api_keys().get("mcp_servers")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+
+
+def save_mcp_server(name: str, spec: dict) -> None:
+    data = load_api_keys()
+    servers = data.get("mcp_servers")
+    if not isinstance(servers, dict):
+        servers = {}
+    servers[name] = spec
+    data["mcp_servers"] = servers
+    write_config(data)
+
+
+def remove_mcp_server(name: str) -> bool:
+    data = load_api_keys()
+    servers = data.get("mcp_servers")
+    if not isinstance(servers, dict) or name not in servers:
+        return False
+    del servers[name]
+    data["mcp_servers"] = servers
+    write_config(data)
+    return True
+
+
 def get_backup_mirror_dir() -> str:
     v = load_api_keys().get("backup_mirror_dir", "")
     return v.strip() if isinstance(v, str) else ""

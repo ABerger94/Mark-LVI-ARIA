@@ -340,9 +340,10 @@ def _command_rows():
         plugins_dir=base / "plugins",
         core_tool_names=inline_names | actions.names(),
         logger=lambda _msg: None)
+    from core import mcp_client as _mcp
     rows = build_command_list(
         inline, actions.get_tool_declarations(),
-        plugins.get_tool_declarations())
+        plugins.get_tool_declarations(), _mcp.declarations())
     rejected = [(r.file, r.error)
                 for r in getattr(actions, "_all_records", [])
                 if not r.valid]
