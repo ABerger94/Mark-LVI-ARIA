@@ -63,6 +63,18 @@ def _watcher(tree: Path, **kw) -> selfedit.SelfEditWatcher:
     return selfedit.SelfEditWatcher(root=tree, **kw)
 
 
+def _read_fully(tree: Path, rel: str) -> None:
+    """Read a fixture file end to end through the gated reader, two
+    lines at a time so the chunking itself is exercised."""
+    n = len((tree / rel).read_text(encoding="utf-8").splitlines())
+    offset = 1
+    while offset <= max(n, 1):
+        ok, text = selfedit.read_own_code(rel, offset=offset, limit=2,
+                                          root=tree)
+        assert ok, text
+        offset += 2
+
+
 # ── the watched set ─────────────────────────────────────────────────────────
 
 def test_watched_set_covers_app_tree_and_persona(tree):
@@ -90,6 +102,7 @@ def test_edit_own_code_writes_allowlisted_file(tree):
 
 
 def test_edit_own_code_can_edit_persona(tree):
+    _read_fully(tree, "core/prompt.txt")   # the read-before-edit gate
     ok, _ = selfedit.edit_own_code(
         "core/prompt.txt", "You are ARIA, take two.\n", root=tree)
     assert ok
@@ -111,6 +124,7 @@ def test_edit_own_code_refuses_outside_allowlist(tree, path):
 
 
 def test_patch_own_code_replaces_unique_match(tree):
+    _read_fully(tree, "core/mod.py")       # the read-before-edit gate
     ok, msg = selfedit.patch_own_code(
         "core/mod.py", "VALUE = 1", "VALUE = 2", root=tree)
     assert ok, msg
@@ -119,7 +133,8 @@ def test_patch_own_code_replaces_unique_match(tree):
 
 
 def test_patch_own_code_refuses_not_found(tree):
-    ok, msg = selfedit.patch_own_code(
+    _read_fully(tree, "core/mod.py")       # past the gate: the refusal
+    ok, msg = selfedit.patch_own_code(     # below is the not-found one
         "core/mod.py", "VALUE = 99", "VALUE = 2", root=tree)
     assert not ok
     assert "not found" in msg
@@ -129,7 +144,8 @@ def test_patch_own_code_refuses_not_found(tree):
 
 def test_patch_own_code_refuses_non_unique(tree):
     _write(tree, "core/mod.py", "VALUE = 1\nVALUE = 1\n")
-    ok, msg = selfedit.patch_own_code(
+    _read_fully(tree, "core/mod.py")       # read AFTER the rewrite:
+    ok, msg = selfedit.patch_own_code(     # coverage is hash-bound
         "core/mod.py", "VALUE = 1", "VALUE = 2", root=tree)
     assert not ok
     assert "matches 2 places" in msg
@@ -228,3 +244,140 @@ def test_watcher_unrestorable_break_announces_and_does_not_restart(tree):
     # boot snapshot — ARIA re-checked too; what matters is the first
     # response was honest and nothing restarted into broken code.
     assert (tree / "core/new_broken.py").exists()
+
+
+# ── validation: EVERY file is import-checked ────────────────────────────────
+
+def test_watcher_restores_import_broken_ui_edit(tree, monkeypatch):
+    """The 2026-10-22 break, replayed: a ui.py that compiles but dies
+    at module level — a class subclassing an attribute a module does
+    not have (the invented-framework shape). Root scripts used to be
+    compile-checked only, so this restarted her into the crash; now
+    ui.py is smoke-imported like everything else and restored."""
+    monkeypatch.setattr(incidents, "INCIDENTS_PATH",
+                        tree / "incidents.jsonl")
+    w = _watcher(tree)
+    _write(tree, "ui.py",
+           "import core.mod as _m\n\n\n"
+           "class HUDReactorCore(_m.View):\n    pass\n")
+    assert w.check() == "restored_restart_armed"
+    assert (tree / "ui.py").read_text(encoding="utf-8") == "print('ui')\n"
+
+
+def test_watcher_restores_import_broken_main_edit(tree, monkeypatch):
+    """main.py gets the same treatment: importing it runs its module
+    level (the __main__ guard keeps the app from launching), so a
+    module-level NameError is caught by validation, not by the
+    restart crashing into it."""
+    monkeypatch.setattr(incidents, "INCIDENTS_PATH",
+                        tree / "incidents.jsonl")
+    w = _watcher(tree)
+    _write(tree, "main.py", "VALUE = undefined_name_xyz\n")
+    assert w.check() == "restored_restart_armed"
+    assert (tree / "main.py").read_text(
+        encoding="utf-8") == "print('entry')\n"
+
+
+def test_watcher_valid_main_and_ui_edits_pass(tree):
+    """A main.py whose main() would explode if RUN proves the smoke
+    import does not launch the app; a valid ui.py edit passes too."""
+    restarted = threading.Event()
+    w = _watcher(tree, restart=restarted.set)
+    _write(tree, "main.py",
+           "def main():\n    raise SystemExit('must not run on import')\n"
+           "\n\nif __name__ == '__main__':\n    main()\n")
+    _write(tree, "ui.py", "VALUE = 'valid ui'\n")
+    assert w.check() == "restart_armed"
+    assert restarted.wait(10)
+
+
+# ── the read-before-edit gate ───────────────────────────────────────────────
+
+def test_edit_refused_without_any_read(tree):
+    ok, msg = selfedit.edit_own_code(
+        "core/mod.py", "VALUE = 2\n", root=tree)
+    assert not ok
+    assert "not read" in msg and "read_own_code" in msg
+    assert "1 of its 1 lines are unread" in msg
+    # Untouched.
+    assert (tree / "core/mod.py").read_text(
+        encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_patch_refused_with_partial_coverage(tree):
+    _write(tree, "core/mod.py", "A = 1\nB = 2\nC = 3\n")
+    ok, _ = selfedit.read_own_code("core/mod.py", offset=1, limit=2,
+                                   root=tree)
+    assert ok
+    ok, msg = selfedit.patch_own_code(
+        "core/mod.py", "C = 3", "C = 4", root=tree)
+    assert not ok
+    assert "1 of its 3 lines are unread" in msg
+    assert "C = 3" in (tree / "core/mod.py").read_text(encoding="utf-8")
+
+
+def test_edit_allowed_after_full_chunked_read(tree):
+    _write(tree, "core/mod.py", "A = 1\nB = 2\nC = 3\n")
+    _read_fully(tree, "core/mod.py")
+    ok, msg = selfedit.patch_own_code(
+        "core/mod.py", "B = 2", "B = 20", root=tree)
+    assert ok, msg
+    assert "B = 20" in (tree / "core/mod.py").read_text(encoding="utf-8")
+
+
+def test_gate_resets_when_file_changes_after_read(tree):
+    _read_fully(tree, "core/mod.py")
+    _write(tree, "core/mod.py", "VALUE = 99\n")     # an outside change
+    ok, msg = selfedit.patch_own_code(
+        "core/mod.py", "VALUE = 99", "VALUE = 100", root=tree)
+    assert not ok
+    assert "not read" in msg
+    assert "VALUE = 99" in (tree / "core/mod.py").read_text(
+        encoding="utf-8")                            # untouched
+
+
+def test_gate_resets_after_her_own_successful_edit(tree):
+    _read_fully(tree, "core/mod.py")
+    ok, _ = selfedit.patch_own_code(
+        "core/mod.py", "VALUE = 1", "VALUE = 2", root=tree)
+    assert ok
+    # Her edit changed the file: the next edit needs a fresh read of
+    # the new version, not goodwill toward the old one.
+    ok, msg = selfedit.patch_own_code(
+        "core/mod.py", "VALUE = 2", "VALUE = 3", root=tree)
+    assert not ok
+    assert "not read" in msg
+    _read_fully(tree, "core/mod.py")
+    ok, _ = selfedit.patch_own_code(
+        "core/mod.py", "VALUE = 2", "VALUE = 3", root=tree)
+    assert ok
+
+
+def test_read_own_code_reports_ranges_and_total(tree):
+    _write(tree, "core/mod.py", "A = 1\nB = 2\nC = 3\nD = 4\nE = 5\n")
+    ok, text = selfedit.read_own_code("core/mod.py", offset=2, limit=2,
+                                      root=tree)
+    assert ok
+    assert "of 5" in text and "3: C = 3" in text
+    assert "2 of 5 lines read; 3 still unread" in text
+    ok, text = selfedit.read_own_code("core/mod.py", offset=4, limit=2,
+                                      root=tree)
+    assert ok
+    # Lines {2,3,4,5} read; line 1 still unread — ranges union.
+    assert "4 of 5 lines read; 1 still unread" in text
+
+
+def test_note_read_text_counts_only_received_lines(tree):
+    """The general reader's route into coverage: only the lines in
+    the text actually returned count (its truncation respected)."""
+    _write(tree, "core/mod.py", "A = 1\nB = 2\nC = 3\n")
+    target = str(tree / "core/mod.py")
+    selfedit.note_read_text(target, "A = 1\nB = 2\n", root=tree)
+    ok, msg = selfedit.patch_own_code(
+        "core/mod.py", "C = 3", "C = 4", root=tree)
+    assert not ok
+    assert "1 of its 3 lines are unread" in msg
+    selfedit.note_read_text(target, "A = 1\nB = 2\nC = 3\n", root=tree)
+    ok, _ = selfedit.patch_own_code(
+        "core/mod.py", "C = 3", "C = 4", root=tree)
+    assert ok

@@ -262,3 +262,68 @@ def test_dev_agent_refused_with_no_ui(ui_unbound, monkeypatch):
                         lambda **kw: builds.append(kw) or "BUILT")
     out = da.dev_agent({"description": "a to-do app"})
     assert "have not done it" in out and builds == []
+
+
+# ── the tree action + folder routing (2026-10-22) ────────────────────────────
+#
+# The live failure these pin: asked to look at all the files in a
+# folder, she answered that she could not access it — read_file on a
+# directory was a dead end ("Not a file"), list was one level, find
+# capped at 20 hits, and nothing routed a folder to a listing at all.
+
+def _mk_proj(root: Path) -> Path:
+    proj = root / "proj"
+    (proj / "core").mkdir(parents=True)
+    (proj / "core" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (proj / "ui.py").write_text("y = 2\n", encoding="utf-8")
+    git = proj / ".git"
+    git.mkdir()
+    (git / "config").write_text("secret\n", encoding="utf-8")
+    cache = proj / "core" / "__pycache__"
+    cache.mkdir()
+    (cache / "mod.cpython.pyc").write_bytes(b"\x00\x01")
+    return proj
+
+
+def test_tree_lists_recursively_dirs_first_and_skips_junk(tmp_path):
+    out = fc.list_tree(str(_mk_proj(tmp_path)))
+    assert "mod.py" in out and "ui.py" in out
+    assert ".git" not in out and "__pycache__" not in out
+    assert "config" not in out                    # .git never entered
+    assert out.index("core/") < out.index("ui.py")   # dirs first
+
+
+def test_tree_depth_cap_is_honored(tmp_path):
+    deep = tmp_path / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "leaf.txt").write_text("x", encoding="utf-8")
+    out = fc.list_tree(str(tmp_path / "a"), depth=1)
+    assert "b/" in out and "c/" not in out
+    out = fc.list_tree(str(tmp_path / "a"))          # default depth 3
+    assert "d/" in out and "leaf.txt" not in out
+    out = fc.list_tree(str(tmp_path / "a"), depth=6)
+    assert "leaf.txt" in out
+    out = fc.list_tree(str(tmp_path / "a"), depth=99)   # clamped to 6
+    assert "leaf.txt" in out
+
+
+def test_tree_entry_cap_truncates_with_a_note(tmp_path):
+    big = tmp_path / "big"
+    big.mkdir()
+    for i in range(320):
+        (big / f"f{i:03}.txt").write_text("x", encoding="utf-8")
+    out = fc.list_tree(str(big))
+    assert out.count("📄") == 300
+    assert "+20 more" in out and "truncated at 300" in out
+
+
+def test_tree_dispatcher_route(tmp_path):
+    out = fc.file_controller({"action": "tree",
+                              "path": str(_mk_proj(tmp_path))})
+    assert "mod.py" in out and "ui.py" in out
+
+
+def test_read_on_a_directory_points_at_list_and_tree(tmp_path):
+    out = fc.read_file(str(tmp_path))
+    assert "Not a file" in out
+    assert "'list'" in out and "'tree'" in out

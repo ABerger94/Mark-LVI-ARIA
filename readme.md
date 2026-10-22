@@ -89,9 +89,9 @@ verified by size. A mirror that fails costs one incident, never the backup.
 
 ## Capabilities
 
-**84 tools** on a desktop install — 9 built in, 74 actions, plus
+**88 tools** on a desktop install — 9 built in, 78 actions, plus
 `youtube_video`, which only loads when a display is present. (A headless
-registry walk counts 83.) Tools from connected MCP servers join on top of
+registry walk counts 87.) Tools from connected MCP servers join on top of
 that, namespaced per server. The in-app **⌘ COMMANDS** overlay is the source
 of truth: it is rebuilt from the live registries every time it opens, so it
 cannot list a tool she doesn't have. The shape of the suite:
@@ -103,12 +103,12 @@ cannot list a tool she doesn't have. The shape of the suite:
 | Spotify & DJ | `spotify` (now playing from the real window title, transport, per-app volume), `dj` (saved playlist → mood → labelled search, in that order — never an invented playlist), `save_playlist` (any Spotify link form, normalised and verified) |
 | Routines | `routine_record_start/stop`, `run_routine` (with `{{param}}` substitution), `list_routines`, `describe_routine`, `delete_routine`, `trust_routine`, `untrust_routine`, `export_routine_pack`, `import_routine_pack` |
 | Scheduling | in-app scheduler: `set_timer`, `set_recurring_task`, `list_scheduled_tasks`, `cancel_scheduled_task`, `break_reminders` — plus `reminder`, which writes OS-level reminders |
-| Connections | `gmail_setup`, `read_email`, `triage_email`, `send_email`; `calendar_setup`, `check_calendar` (read-only iCal feed; recurring events expand — RRULE, EXDATE and RDATE honoured); `github_setup`, `github_create_repo`, `github_push_file`; `provider_setup` |
+| Connections | `gmail_setup`, `read_email`, `triage_email`, `send_email`; `calendar_setup`, `check_calendar` (read-only iCal feed; recurring events expand — RRULE, EXDATE and RDATE honoured); `github_setup`, `github_create_repo`, `github_push_file`, `github_list_files`, `github_read_file`, `github_repo_info` (reads need the token only — arming gates writes); `provider_setup` |
 | Delegation | `delegate_task` (a prompt worked in the background by her own engine, up to 4 in flight), `task_status`, `task_cancel` — records in `memory/delegated_tasks.json`, completion announced through the scheduler |
 | MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` |
 | Watches | price watches (`watch_price`, `check_price_watches`, `list_price_watches`, `unwatch_price` — checks ride the scheduler), screen watches (`watch_screen`, `unwatch_screen`, `list_screen_watches`), news topic monitors (`manage_monitor`) |
 | Notes & cards | `take_note`, `read_notes`, `journal_write`; `mtg_card`, `mtg_advice` (Scryfall, keyless) |
-| Herself | `save_memory`, `recall_memory`, `forget_memory`, `edit_own_code`, `patch_own_code`, `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
+| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
 
 **Startup briefing.** On launch she greets you with a briefing composed in
 code — calendar, triaged inbox, weather, headlines from your monitored
@@ -139,6 +139,10 @@ needed.
   a Refresh button and honest not-connected/error states. The panel header
   follows the tab: the news title on News, `Gmail Inbox - X Unread Emails`
   (a real count, once counted) on Inbox, `Calendar` on Calendar.
+- **Behind the centrepiece:** a precomputed neuron field — faint nodes
+  and wiring around the core/face, with signal pulses travelling the
+  edges — drawn under whichever centrepiece is active, in its state
+  colours, stepped on the existing animation tick.
 - **Conversation log:** the session transcript, capped at 600 blocks.
 - **Overlays:** **⌘ COMMANDS** (every tool, from the registries),
   **🧠 MEMORY** (every stored fact, when she learned it, forgettable),
@@ -240,8 +244,15 @@ Idempotent; her DJ playlists land in the store's `playlist` category, where
   delete entire named user folders (Desktop, Documents, …) outright.
 - **Self-editing with a net.** She watches her own source tree by hash. A
   change triggers compile → smoke-import → spoken announcement → restart.
-  A broken edit is kept as `<file>.broken-<timestamp>`, the file is restored
-  from git, and she restarts into the restored tree — or doesn't restart at
+  The smoke import covers *every* watched file — the root scripts
+  included, no compile-only exceptions (a class invented against a
+  framework that doesn't exist compiles fine and crashes at import;
+  that break is what closed the exception). The edit tools also refuse
+  any file she has not first read in full at its current version —
+  `read_own_code` pages in line ranges and tracks hash-bound coverage —
+  so a blind rewrite is refused before it can be broken. A broken edit
+  is kept as `<file>.broken-<timestamp>`, the file is restored from
+  git, and she restarts into the restored tree — or doesn't restart at
   all if the restore fails.
 - **Outcome discipline.** Tools answer `done` only after a verifying
   observation; `unverified`, `failed` and `ask` are first-class answers,
@@ -299,8 +310,9 @@ py -3.12 -m pytest tests\test_commands.py -q
 
 Layout, briefly: `main.py` (session, dispatch, startup briefing),
 `ui.py` (the HUD), `core/` (prompt, gemini ladders, confirm, outcome,
-commands, scheduler, routines, self-edit, watchdog, self-heal, backup
-mirror, delegation, MCP client, gmail/ical/github/spotify cores),
+commands, scheduler, routines, self-edit, playback writer, watchdog,
+self-heal, backup mirror, delegation, MCP client,
+gmail/ical/github/spotify cores),
 `actions/` (one file per tool, self-describing), `providers/` (the opt-in
 pipeline), `memory/` (store, config, embeddings), `dashboard/` (phone UI),
 `tools/` (the ARIA memory importer).

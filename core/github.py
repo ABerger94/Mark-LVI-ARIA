@@ -12,10 +12,17 @@ ARIA's two-step trust model, kept exactly:
      ("arm GitHub" → github_setup with arm=true) or by hand in the
      config.
 
-Both tools refuse cleanly in the two unready states — not connected,
-or connected but not armed — with the instruction for fixing that
-state in the outcome itself, the way ARIA's _github_request refused
-with "GitHub token not configured or armed".
+Both write tools refuse cleanly in the two unready states — not
+connected, or connected but not armed — with the instruction for
+fixing that state in the outcome itself, the way ARIA's
+_github_request refused with "GitHub token not configured or armed".
+
+The READ tools (list / read file / repo info) sit on the other side
+of that line: they need only the connected state. Arming is the
+write-side trust decision — reads were never the dangerous side in
+ARIA's semantics — and until they existed, "review the codebase"
+was impossible for her: the port shipped with no read path at all,
+so she reported a missing capability as a broken connector.
 
 The HTTP seam (`_urlopen`) is the only network surface; the tests
 replace it, so the gate and the request shapes are exercised with no
@@ -72,6 +79,14 @@ def gate(action: str) -> Optional[str]:
         return None
     return not_connected(action) if s == "not_connected" \
         else not_armed(action)
+
+
+def read_gate(action: str) -> Optional[str]:
+    """None when a GitHub READ may proceed, else the refusal outcome.
+    Connected is enough: the armed flag gates writes only."""
+    if state() == "not_connected":
+        return not_connected(action)
+    return None
 
 
 def _request(path: str, method: str = "GET",
@@ -138,3 +153,122 @@ def push_file(repo: str, filepath: str, content: str,
         return outcome.failed("github_push_file", err,
                               repo=r_name, path=filepath)
     return outcome.done("github_push_file", repo=r_name, path=filepath)
+
+
+# ── Reads (connected only — see the header) ─────────────────────────────────
+
+_READ_CAP = 12000   # chars of a file handed to the model per read
+
+
+def _read_error(err: str, what: str) -> str:
+    """Map a _request error to the honest one-liner a read deserves:
+    on a read, a 401 is a dead token, a 404 almost always a wrong
+    name, a 403 the rate limit or a permissions wall — say which, in
+    this module's voice. The token itself is never in any of these."""
+    if "GitHub API error 401" in err:
+        return ("GitHub refused the stored token (401) — it may have "
+                "expired or been revoked. The user can reconnect by "
+                "saying 'set up GitHub' with a fresh token.")
+    if "GitHub API error 404" in err:
+        return (f"I couldn't find {what} on GitHub (404) — check the "
+                f"repository name and the path.")
+    if "GitHub API error 403" in err:
+        return ("GitHub refused the request (403) — most likely the "
+                "API rate limit, or the token cannot see that "
+                "repository. A rate limit usually clears by waiting.")
+    return err
+
+
+def list_files(repo: str, path: str = "") -> str:
+    r_name = resolve_repo(repo)
+    clean = (path or "").strip().strip("/")
+    url = f"/repos/{r_name}/contents"
+    if clean:
+        url += "/" + urllib.parse.quote(clean)
+    result, err = _request(url)
+    if err:
+        what = f"{r_name}/{clean}" if clean else f"the repository {r_name}"
+        return outcome.failed("github_list_files",
+                              _read_error(err, what),
+                              repo=r_name, path=clean)
+    if isinstance(result, dict):
+        # The path names a file, not a directory.
+        return outcome.done("github_list_files", repo=r_name,
+                            path=clean) + (
+            f"\n{clean} is a file ({result.get('size', 0):,} bytes) "
+            f"— use github_read_file to read it.")
+    lines = [f"Contents of {r_name}/" + (f"{clean}/" if clean else "")]
+    if not result:
+        lines.append("(empty directory)")
+    for item in result:
+        name = item.get("name", "?")
+        if item.get("type") == "dir":
+            lines.append(f"dir   {name}/")
+        else:
+            lines.append(
+                f"file  {name} ({item.get('size', 0):,} bytes)")
+    return outcome.done("github_list_files", repo=r_name, path=clean,
+                        entries=len(result)) + "\n" + outcome.untrusted(
+                            "github", "\n".join(lines))
+
+
+def read_file(repo: str, filepath: str) -> str:
+    r_name = resolve_repo(repo)
+    enc_path = urllib.parse.quote(filepath)
+    result, err = _request(f"/repos/{r_name}/contents/{enc_path}")
+    if err:
+        return outcome.failed(
+            "github_read_file",
+            _read_error(err, f"{filepath} in {r_name}"),
+            repo=r_name, path=filepath)
+    if isinstance(result, list):
+        return outcome.failed(
+            "github_read_file",
+            f"{filepath} is a directory — list it with "
+            f"github_list_files instead.",
+            repo=r_name, path=filepath)
+    size = result.get("size", 0)
+    if result.get("encoding") != "base64" or not result.get("content"):
+        # The contents API serves no body for files over ~1 MB.
+        return outcome.done("github_read_file", repo=r_name,
+                            path=filepath) + (
+            f"\n{filepath} is {size:,} bytes — too large for "
+            f"GitHub's contents API to hand over this way, so I "
+            f"can't read it here.")
+    raw = base64.b64decode(result["content"])
+    try:
+        text = raw.decode("utf-8")
+        if "\x00" in text[:1024]:
+            raise UnicodeDecodeError("utf-8", raw[:1], 0, 1, "NUL byte")
+    except UnicodeDecodeError:
+        return outcome.done("github_read_file", repo=r_name,
+                            path=filepath) + (
+            f"\n{filepath} is binary ({len(raw):,} bytes), not text "
+            f"— I can't read it out.")
+    total = len(text)
+    head = outcome.done("github_read_file", repo=r_name, path=filepath,
+                        chars=total)
+    if total > _READ_CAP:
+        head += (f"\n[Truncated — showing the first "
+                 f"{_READ_CAP:,} of {total:,} characters "
+                 f"({size:,} bytes).]")
+        text = text[:_READ_CAP]
+    return head + "\n" + outcome.untrusted("github", text)
+
+
+def repo_info(repo: str) -> str:
+    r_name = resolve_repo(repo)
+    result, err = _request(f"/repos/{r_name}")
+    if err:
+        return outcome.failed(
+            "github_repo_info",
+            _read_error(err, f"the repository {r_name}"),
+            repo=r_name)
+    return outcome.done(
+        "github_repo_info", repo=r_name,
+        description=(result.get("description") or "")[:200],
+        default_branch=result.get("default_branch", ""),
+        language=result.get("language") or "",
+        updated_at=result.get("updated_at", ""),
+        open_issues=result.get("open_issues_count", 0),
+        visibility="private" if result.get("private") else "public")

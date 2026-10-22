@@ -226,6 +226,77 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
         return f"Error listing files: {e}"
 
 
+_TREE_SKIP = {".git", "__pycache__", "node_modules"}
+_TREE_MAX_ENTRIES = 300
+
+
+def list_tree(path: str = "desktop", depth: int = 3) -> str:
+    """Recursive overview of a directory — the shape "look at all the
+    files in <folder>" actually needs. list_files is one level and
+    find_files caps out at 20 hits, so before this existed a deep
+    folder (a source tree, say) read to her as inaccessible. Depth is
+    capped (default 3, at most 6), the listing stops at
+    _TREE_MAX_ENTRIES with the truncation stated, and the subtrees
+    that are never the point (.git, __pycache__, node_modules) are
+    skipped outright."""
+    try:
+        target = _resolve_path(path)
+        if not target.exists():
+            return f"Path not found: {target}"
+        if not target.is_dir():
+            return f"Not a directory: {target}"
+        try:
+            depth = int(depth or 3)
+        except (TypeError, ValueError):
+            depth = 3
+        depth = min(max(depth, 1), 6)
+
+        lines = [f"📁 {target.name}/"]
+        shown = 0
+        unshown = 0
+
+        def walk(d: Path, level: int) -> None:
+            nonlocal shown, unshown
+            try:
+                items = sorted(
+                    d.iterdir(),
+                    key=lambda p: (not p.is_dir(), p.name.lower()))
+            except PermissionError:
+                lines.append(f"{'  ' * level}🔒 (permission denied)")
+                return
+            for item in items:
+                if item.name in _TREE_SKIP and item.is_dir():
+                    continue
+                if shown >= _TREE_MAX_ENTRIES:
+                    unshown += 1
+                    continue
+                shown += 1
+                indent = "  " * level
+                if item.is_dir():
+                    lines.append(f"{indent}📁 {item.name}/")
+                    if level < depth:
+                        walk(item, level + 1)
+                else:
+                    try:
+                        size = _format_size(item.stat().st_size)
+                    except OSError:
+                        size = "?"
+                    lines.append(f"{indent}📄 {item.name} ({size})")
+
+        walk(target, 1)
+        if unshown:
+            lines.append(
+                f"… +{unshown} more entries not shown "
+                f"(truncated at {_TREE_MAX_ENTRIES})")
+        return (f"Tree of {target.name}/ ({shown} entries, "
+                f"depth {depth}):\n" + "\n".join(lines))
+
+    except PermissionError:
+        return f"Permission denied: {path}"
+    except Exception as e:
+        return f"Error listing tree: {e}"
+
+
 def create_file(path: str, name: str = "", content: str = "") -> str:
     try:
         base   = _resolve_path(path)
@@ -383,12 +454,29 @@ def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
         target = (base / name) if name else base
         if not target.exists():
             return f"File not found: {target.name}"
+        if target.is_dir():
+            return (f"Not a file: {target.name} — that's a folder. "
+                    f"Use action 'list' for one level of it, or "
+                    f"action 'tree' for a recursive overview.")
         if not target.is_file():
             return f"Not a file: {target.name}"
 
         content = target.read_text(encoding="utf-8", errors="ignore")
         if len(content) > max_chars:
-            content = content[:max_chars] + f"\n\n[Truncated — {len(content)} total chars]"
+            shown = content[:max_chars]
+            content = shown + f"\n\n[Truncated — {len(content)} total chars]"
+        else:
+            shown = content
+        # If what she just read is one of her own source files, the
+        # lines she actually received count toward the read-before-
+        # edit coverage in core/selfedit.py — respecting THIS reader's
+        # truncation: only `shown` was received, never the whole file
+        # (and this reader has no offset, so it is always the head).
+        try:
+            from core import selfedit as _selfedit
+            _selfedit.note_read_text(str(target), shown)
+        except Exception:
+            pass
         return content
 
     except Exception as e:
@@ -661,6 +749,9 @@ def file_controller(
         if action == "list":
             return list_files(path)
 
+        elif action == "tree":
+            return list_tree(path, depth=params.get("depth", 3))
+
         elif action == "create_file":
             return create_file(path, name=name, content=params.get("content", ""))
 
@@ -722,13 +813,13 @@ def file_controller(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_controller",
-    "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
+    "description": "Manages files and folders: list, tree, create, delete, move, copy, rename, read, write, find, disk usage. If the path is a FOLDER, use action 'list' (one level) or 'tree' (recursive overview) — action 'read' is for files only and answers 'Not a file' for folders.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info"
+                "description": "list | tree | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info"
             },
             "path": {
                 "type": "STRING",
@@ -757,6 +848,10 @@ TOOL = {
             "count": {
                 "type": "INTEGER",
                 "description": "Number of results for largest"
+            },
+            "depth": {
+                "type": "INTEGER",
+                "description": "Recursion depth for action 'tree' (default 3, max 6)"
             }
         },
         "required": [

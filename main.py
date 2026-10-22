@@ -64,6 +64,7 @@ from memory.memory_manager import (
 # system_status).
 from core import outcome
 from core.action_loader import strip_meta
+from core.playback import PlaybackWriter
 from actions.screen_processor  import _capture_camera, _capture_screen
 from actions.system_monitor    import SystemMonitor, get_system_status
 from actions.proactive         import ProactiveEngine
@@ -705,6 +706,10 @@ class JarvisLive:
         # handed to the device far faster than they play, so "now" ran the lips
         # ahead of the words and cut every schedule short. 0 = nothing playing.
         self._play_cursor          = 0.0
+        # The playback writer thread for the running _play_audio, if any
+        # (core/playback.py). interrupt() flushes it so a barge-in leaves
+        # at most the in-flight ~200 ms batch sounding.
+        self._playback_writer      = None
         self.ui.on_push_to_talk   = self.set_push_to_talk
         self.ui.ptt_hold          = self._on_ptt
         self.ui.on_text_command   = self._on_text_command
@@ -1339,6 +1344,15 @@ class JarvisLive:
             if drained:
                 print(f"[JARVIS] ✋ Interrupted — {drained} audio chunks discarded")
         self.set_speaking(False)
+        # Drop any batches the playback writer has not written yet, so the
+        # speakers stop with the queue: at most the in-flight ~200 ms batch
+        # is still sounding — the bound the batching cap has always promised.
+        _writer = self._playback_writer
+        if _writer is not None:
+            try:
+                _writer.flush()
+            except Exception:
+                pass
         # The words we were about to mouth are never going to be spoken now.
         self._visemes.reset()
         self._play_cursor = 0.0     # next batch starts a fresh timeline
@@ -2218,24 +2232,33 @@ class JarvisLive:
             st.start()
             return st
 
-        try:
-            stream = _open_spk(_spk_dev)
-        except Exception as _e:
+        def _spk_fallback(_e):
             # A chosen output that the host API accepts by name but refuses to
             # open (exclusive mode, wrong sample rate, device asleep) must not
             # cost the user their voice. Fall back to the default and say so.
-            if _spk_dev is None:
-                raise
             print(f"[JARVIS] ⚠️  Output device '{_spk_name}' failed: {_e} — using default")
             self.ui.write_log(f"SYS: Speaker '{_spk_name}' unavailable — using system default.")
-            stream = _open_spk(None)
+
+        # The stream lives on a dedicated writer thread (core/playback.py).
+        # Writes used to go through the loop's default executor — the same
+        # pool that carries essentially all tool execution — so the heavier
+        # a session's tool use, the longer each write waited, the device
+        # buffer starved, and her speech degraded into crackle that worsened
+        # with use. The writer opens the stream on its own thread and heals
+        # it there if a write fails or stalls; start() blocks until the open
+        # succeeds, raising exactly as the inline open did (chosen device,
+        # fallback to default, otherwise the error propagates).
+        writer = PlaybackWriter(_open_spk, device=_spk_dev,
+                                on_fallback=_spk_fallback)
+        writer.start()
+        self._playback_writer = writer
 
         # Ask the device how far behind the speakers actually are, rather than
         # assuming. This is what the echo tail is sized from, so a machine with a
         # large audio buffer gets a correspondingly longer guard — and one with a
         # tiny buffer is not penalised with a delay it does not need.
         try:
-            lat = float(getattr(stream, "latency", 0.0) or 0.0)
+            lat = writer.latency
             if 0.0 < lat < 1.0:
                 self._out_latency = lat
             print(f"[JARVIS] 🔊 Output latency {self._out_latency*1000:.0f} ms "
@@ -2251,6 +2274,8 @@ class JarvisLive:
                         timeout=0.1
                     )
                 except asyncio.TimeoutError:
+                    if writer.error is not None:
+                        break   # output stream died for good (see writer)
                     if (
                         self._turn_done_event
                         and self._turn_done_event.is_set()
@@ -2259,6 +2284,9 @@ class JarvisLive:
                         self.set_speaking(False)
                         self._turn_done_event.clear()
                     continue
+
+                if writer.error is not None:
+                    break       # output stream died for good (see writer)
 
                 self.set_speaking(True)
 
@@ -2271,6 +2299,13 @@ class JarvisLive:
                         batch.extend(self.audio_in_queue.get_nowait())
                     except asyncio.QueueEmpty:
                         break
+
+                # Hand the batch to the writer thread FIRST. The analysis
+                # below (viseme FFT, echo band energies) runs synchronously
+                # on this loop and used to sit between the queue and the
+                # write, adding jitter to when the device got fed. It may
+                # still delay the mouth; it must never delay the speaker.
+                writer.submit(bytes(batch))
 
                 # Drive the HUD waveform and the avatar's mouth from JARVIS's
                 # own voice. The batch is up to 200 ms long, so we hand over a
@@ -2322,17 +2357,14 @@ class JarvisLive:
                 except Exception:
                     pass
 
-                try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
-                except (RuntimeError, asyncio.CancelledError):
-                    break   # executor shutting down — exit cleanly
         except Exception as e:
             print(f"[JARVIS] ❌ Play: {e}")
             raise
         finally:
             self.set_speaking(False)
-            stream.stop()
-            stream.close()
+            if self._playback_writer is writer:
+                self._playback_writer = None
+            writer.close()   # stream stop/close happens on the writer thread
 
     # ── Morning briefing ────────────────────────────────────────────────────────
 

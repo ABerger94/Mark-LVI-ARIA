@@ -449,6 +449,12 @@ class HudCanvas(QWidget):
         # so paintEvent blits it in one call instead of thousands of drawPoint()s.
         self._grid_cache: QPixmap | None = None
         self._grid_key = None
+        # Neuron field behind the centrepiece (see _paint_neurons):
+        # geometry precomputed per canvas size like the grid; pulses
+        # are [edge_index, position, speed] and step in _step().
+        self._neuron_cache = None
+        self._neuron_key = None
+        self._pulses: list = []
         # Repaint throttle counter (idle frames drop to ~20 Hz — see _step()).
         self._paint_tick = 0
 
@@ -604,6 +610,7 @@ class HudCanvas(QWidget):
         # a rate that changes with state jumps the rings the instant JARVIS
         # starts talking. Same lesson the head's sway taught.
         self._core_phase += min(0.10, max(0.0, dt))
+        self._step_neurons(dt)
 
         if self._avatar is not None and self.hud_style == "face":
             self._avatar.step(dt, amp, speaking=self.speaking,
@@ -673,6 +680,125 @@ class HudCanvas(QWidget):
             return not (win.isMinimized() or win.isHidden())
         except Exception:
             return True      # never let a visibility check stop the HUD drawing
+
+    # ── neuron field ─────────────────────────────────────────────────────────
+    # Alek's ask (2026-10-22): moving lines behind the reactor core / face,
+    # like neurons firing. A fixed node-and-connection graph fills the
+    # canvas around the centrepiece; signal pulses spawn at random, travel
+    # an edge as a bright head with a fading trail, and die at the far node.
+    # The graph is precomputed per canvas size (seeded, so the network is
+    # the SAME network every frame — firing reads as activity in a fixed
+    # brain, not as noise), pulses step on the existing 60 Hz tick, and the
+    # paint is a handful of premixed lines under everything else.
+
+    def _make_neurons(self, W: int, H: int, cx: float, cy: float,
+                      r_out: float):
+        """Precompute the field for one canvas size: (nodes, edges, lines).
+        Nodes keep clear of the central disc the centrepiece occupies —
+        the field lives around and behind it, which is where it shows."""
+        rng = random.Random(20261022)
+        nodes: list = []
+        min_d = min(W, H) * 0.075
+        tries = 0
+        while len(nodes) < 56 and tries < 1200:
+            tries += 1
+            x = rng.uniform(W * 0.03, W * 0.97)
+            y = rng.uniform(H * 0.03, H * 0.97)
+            if math.hypot(x - cx, y - cy) < r_out:
+                continue
+            if any(math.hypot(x - nx, y - ny) < min_d for nx, ny in nodes):
+                continue
+            nodes.append((x, y))
+        max_len = min(W, H) * 0.30
+        edges, seen = [], set()
+        for i, (x, y) in enumerate(nodes):
+            near = sorted(
+                (math.hypot(x - ox, y - oy), j)
+                for j, (ox, oy) in enumerate(nodes) if j != i)
+            for d, j in near[:2]:
+                if d > max_len:
+                    continue
+                key = (min(i, j), max(i, j))
+                if key not in seen:
+                    seen.add(key)
+                    edges.append((key[0], key[1], d))
+        lines = [QLineF(nodes[i][0], nodes[i][1], nodes[j][0], nodes[j][1])
+                 for i, j, _d in edges]
+        return nodes, edges, lines
+
+    def _step_neurons(self, dt: float) -> None:
+        """Advance pulses on the canvas's existing tick. Sparse spawning
+        and a hard cap keep the per-frame cost at a few short lines."""
+        field = self._neuron_cache
+        if not field:
+            return
+        edges = field[1]
+        if not edges:
+            return
+        step = min(0.10, max(0.0, dt))
+        alive = []
+        for pulse in self._pulses:
+            pulse[1] += pulse[2] * step
+            if pulse[1] < 1.0:
+                alive.append(pulse)
+        self._pulses = alive
+        cap = 3 if self.muted else 7
+        if len(self._pulses) < cap and random.random() < 0.14:
+            self._pulses.append([random.randrange(len(edges)), 0.0,
+                                 random.uniform(0.45, 1.05)])
+
+    def _paint_neurons(self, p: QPainter, W: float, H: float, cx: float,
+                       cy_head: float, r_out: float) -> None:
+        """Draw the field UNDER the centrepiece: faint wiring, small
+        node points, then each pulse as a bright head with a fading
+        trail along its edge. Colours are the core's own state colours,
+        pre-mixed onto the background exactly as _paint_core mixes."""
+        key = (W, H)
+        if self._neuron_cache is None or self._neuron_key != key:
+            self._neuron_cache = self._make_neurons(
+                int(W), int(H), cx, cy_head, r_out)
+            self._neuron_key = key
+            n_edges = len(self._neuron_cache[1])
+            self._pulses = [pl for pl in self._pulses if pl[0] < n_edges]
+        nodes, edges, lines = self._neuron_cache
+        if not lines:
+            return
+        main, acc = self._core_colours()
+        bg = qcol(C.BG)
+
+        def blend(col: QColor, a: float) -> QColor:
+            k = max(0.0, min(1.0, a))
+            return QColor(int(bg.red()   + (col.red()   - bg.red())   * k),
+                          int(bg.green() + (col.green() - bg.green()) * k),
+                          int(bg.blue()  + (col.blue()  - bg.blue())  * k))
+
+        p.setPen(QPen(blend(main, 0.10), 1))
+        p.drawLines(lines)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(blend(main, 0.30)))
+        for (x, y) in nodes:
+            p.drawEllipse(QRectF(x - 1.5, y - 1.5, 3.0, 3.0))
+
+        for eidx, t, _spd in self._pulses:
+            if eidx >= len(edges):
+                continue
+            i, j, _d = edges[eidx]
+            ax, ay = nodes[i]
+            bx, by = nodes[j]
+            hx, hy = ax + (bx - ax) * t, ay + (by - ay) * t
+            for k in range(5):
+                t0 = t - k * 0.06
+                t1 = t - (k + 1) * 0.06
+                if t0 <= 0.0:
+                    break
+                p.setPen(QPen(blend(acc, 0.42 - k * 0.08), 1.6))
+                p.drawLine(QLineF(ax + (bx - ax) * max(t1, 0.0),
+                                  ay + (by - ay) * max(t1, 0.0),
+                                  ax + (bx - ax) * t0,
+                                  ay + (by - ay) * t0))
+            p.setBrush(QBrush(blend(acc, 0.90)))
+            p.drawEllipse(QRectF(hx - 2.1, hy - 2.1, 4.2, 4.2))
 
     # ── reactor core ─────────────────────────────────────────────────────────
     # The centrepiece for anyone who did not want a face looking back at them.
@@ -856,6 +982,14 @@ class HudCanvas(QWidget):
             self._grid_cache = self._make_grid(W, H)
             self._grid_key   = _gkey
         p.drawPixmap(0, 0, self._grid_cache)
+
+        # neuron field — behind whichever centrepiece is active: the
+        # head and the reactor are two branches of this same canvas
+        # sharing this same band, so one draw here sits behind both.
+        _nb_t = 12.0
+        _nb_h = max(60.0, cy + fw * 0.40 - 12.0 - _nb_t)
+        self._paint_neurons(p, W, H, cx, _nb_t + _nb_h / 2.0,
+                            min(W * 0.46, _nb_h / 2.0) * 0.70)
 
         # ── holographic head ────────────────────────────────────────────────
         # Sized to the band between the top of the canvas and the status line,

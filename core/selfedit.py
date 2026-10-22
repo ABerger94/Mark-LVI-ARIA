@@ -45,6 +45,39 @@ THE RESTART ITSELF
     exit). It is deliberately NOT routed through core/confirm.py: the
     announcement IS the notice, exactly as ARIA's self-restart was
     announced-not-gated.
+
+READ BEFORE EDIT, IMPORT BEFORE RESTART (Alek's rules, 2026-10-22)
+
+    Two rules, both enforced here rather than merely taught:
+
+    READ A FILE FULLY BEFORE EDITING IT. read_own_code() reads a
+    watched file in explicit line ranges and records coverage —
+    per file, keyed to the file's current sha256, the union of
+    ranges read this process. edit_own_code and patch_own_code
+    REFUSE until coverage at the file's current hash covers every
+    line, and the refusal says how many lines remain unread. Any
+    change to the file (hers, or anyone's) changes the hash and
+    resets the requirement: she re-reads the version she is about
+    to edit, never an ancestor of it. Coverage lives in-process
+    (session) only — a restart means re-reading before the next
+    edit, which is the point. The rule exists because the general
+    read_file truncates at 4,000 chars with no offset: through it,
+    a file like ui.py (~7,700 lines) could never be read in full,
+    so she rewrote it blind. Lines received through read_file DO
+    count toward coverage (file_controller notes them, truncation
+    respected); read_own_code is how she finishes the job.
+
+    IMPORT-CHECK EVERY CHANGED FILE. Every watched .py — root
+    scripts included — is smoke-imported in a subprocess before a
+    restart may load it; compile-only is never sufficient. ui.py is
+    a library to main.py (`from ui import JarvisUI`), and main.py's
+    `if __name__ == "__main__":` guard makes importing it execute
+    its module level without launching the app. The 2026-10-22
+    break is the case this closes: an invented
+    `class HUDReactorCore(ui.View)` COMPILES, so the old
+    compile-only treatment of root scripts passed it and the
+    watcher restarted her into the AttributeError. core/prompt.txt
+    is not importable Python and stays hash/existence-checked.
 """
 
 from __future__ import annotations
@@ -131,6 +164,150 @@ def snapshot_hashes(root: Optional[Path] = None) -> Dict[str, Optional[str]]:
     return {str(p): _file_sha256(p) for p in watched_source_files(root)}
 
 
+# ── Read-before-edit coverage ─────────────────────────────────────────────
+#
+# The registry the gate consults: per file, the union of line ranges read
+# at the file's CURRENT sha256. Hash binding is the honesty — coverage
+# recorded against any other bytes counts for nothing, so an edit (hers
+# included) or an outside change resets the requirement to read the new
+# version. In-process only; see the module header for why that is a
+# feature. All functions here never raise into a read or an edit.
+
+_coverage_lock = threading.Lock()
+_coverage: Dict[str, Tuple[str, set]] = {}   # abspath -> (sha256, {lines})
+
+
+def _line_count(text: str) -> int:
+    """Lines in a file's text, the way an editor counts them: a final
+    newline ends the last line rather than starting a phantom one."""
+    if not text:
+        return 0
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+def note_read_coverage(path: str, start_line: int, end_line: int) -> None:
+    """Record that lines [start_line, end_line] (1-based, inclusive) of
+    the file at `path` were read at its current hash."""
+    try:
+        sha = _file_sha256(path)
+        if sha is None:
+            return
+        start = max(1, int(start_line))
+        end = int(end_line)
+        with _coverage_lock:
+            entry = _coverage.get(path)
+            if entry is None or entry[0] != sha:
+                entry = (sha, set())
+                _coverage[path] = entry
+            if end >= start:
+                entry[1].update(range(start, end + 1))
+    except Exception:
+        pass
+
+
+def note_read_text(path: str, text: str,
+                   root: Optional[Path] = None) -> None:
+    """Record coverage for a read that returned `text` starting at
+    line 1 — the shape of the general file reader (actions/
+    file_controller.read_file), whose return is the file's head,
+    truncated at its character cap. Only lines actually present in
+    the returned text count. Watched files only; anything else is
+    ignored."""
+    try:
+        target, refusal = _resolve_target(str(path), root)
+        if refusal or not target or not text:
+            return
+        note_read_coverage(target, 1, _line_count(text))
+    except Exception:
+        pass
+
+
+def _unread_lines(path: str) -> Optional[Tuple[int, int]]:
+    """(total_lines, unread_count) for the file at its CURRENT hash,
+    or None when the file cannot be read at all."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            total = _line_count(f.read())
+    except Exception:
+        return None
+    sha = _file_sha256(path)
+    with _coverage_lock:
+        entry = _coverage.get(path)
+        covered = entry[1] if entry and entry[0] == sha else set()
+    unread = sum(1 for n in range(1, total + 1) if n not in covered)
+    return total, unread
+
+
+def _read_gate_refusal(target: str, root: Optional[Path]) -> Optional[str]:
+    """The read-before-edit gate: a refusal when the file at `target`
+    has not been read in full at its current version, else None. A
+    file that does not exist yet has nothing to read — creating it is
+    edit_own_code's stated job, so it passes."""
+    if not os.path.isfile(target):
+        return None
+    state = _unread_lines(target)
+    if state is None:
+        return None   # unreadable: the edit's own I/O fails honestly
+    total, unread = state
+    if unread == 0:
+        return None
+    return (f"Self-edit refused: you have not read {_rel(target, root)} "
+            f"in full — {unread} of its {total} lines are unread at "
+            f"its current version. Read the whole file first with "
+            f"read_own_code (it reads in line ranges and reports the "
+            f"total and what remains), then edit. Coverage is tied to "
+            f"the file's current content: any change to it — including "
+            f"your own last edit — means reading the new version "
+            f"before the next edit.")
+
+
+def read_own_code(path: str, offset: int = 1, limit: int = 400,
+                  root: Optional[Path] = None) -> Tuple[bool, str]:
+    """Read a chunk of one of her own source files, in line ranges —
+    the reader the read-before-edit gate counts. Returns (ok, text):
+    a header naming the range and the running coverage, then the
+    lines, numbered. The general read_file cannot do this job: it
+    truncates at a character cap with no offset, so a large file
+    (ui.py is ~7,700 lines) could never be read in full through it.
+    """
+    target, refusal = _resolve_target(path, root)
+    if refusal:
+        return False, f"Read refused: {refusal}."
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            lines = f.read().split("\n")
+    except FileNotFoundError:
+        return False, (f"Read failed: {_rel(target, root)} does not "
+                       f"exist.")
+    except Exception as e:
+        return False, f"Read failed: {type(e).__name__}: {e}"
+    # A trailing newline leaves a phantom empty element; the gate
+    # counts lines the editor's way, so drop it — reads and the gate
+    # must count the same lines.
+    if lines and lines[-1] == "":
+        lines.pop()
+    total = len(lines)
+    if total == 0:
+        note_read_coverage(target, 1, 0)
+        return True, f"{_rel(target, root)} is empty (0 lines) — fully read."
+    start = min(max(1, int(offset or 1)), total)
+    lim = min(max(1, int(limit or 400)), 2000)
+    end = min(total, start + lim - 1)
+    note_read_coverage(target, start, end)
+    state = _unread_lines(target)
+    unread = state[1] if state else 0
+    chunk = "\n".join(f"{n}: {lines[n - 1]}"
+                      for n in range(start, end + 1))
+    if unread == 0:
+        status = "fully read — you may edit this file"
+    else:
+        status = (f"{total - unread} of {total} lines read; {unread} "
+                  f"still unread — keep reading ranges until none "
+                  f"remain before editing")
+    return True, (f"--- {_rel(target, root)} lines {start}–{end} of "
+                  f"{total} ({status}) ---\n{chunk}")
+
+
 # ── The edit tools ──────────────────────────────────────────────────────────
 
 def _resolve_target(path: str, root: Optional[Path] = None):
@@ -186,6 +363,9 @@ def edit_own_code(path: str, content: str,
     target, refusal = _resolve_target(path, root)
     if refusal:
         return False, f"Self-edit refused: {refusal}."
+    gate = _read_gate_refusal(target, root)
+    if gate:
+        return False, gate
     try:
         _atomic_write(target, content or "")
     except Exception as e:
@@ -205,6 +385,9 @@ def patch_own_code(path: str, old_text: str, new_text: str,
     target, refusal = _resolve_target(path, root)
     if refusal:
         return False, f"Self-edit refused: {refusal}."
+    gate = _read_gate_refusal(target, root)
+    if gate:
+        return False, gate
     if not old_text:
         return False, "Self-edit failed: old_text is empty — nothing to match."
     try:
@@ -274,18 +457,20 @@ def _missing_third_party_dep(stderr_tail: str) -> bool:
 
 
 def _smoke_import_changed(changed: List[str], root: Path) -> list:
-    """Import-smoke-test changed package modules in a subprocess.
+    """Import-smoke-test EVERY changed watched .py in a subprocess.
 
     py_compile passing is NOT enough: a file can parse yet fail at
-    import. Each changed module under one of the package dirs is
-    imported in a fresh interpreter with cwd=repo root — the same
-    import the restart would do. Parent packages are stubbed (empty
-    __init__, real __path__) so the test exercises THE MODULE's own
-    imports rather than package __init__ side effects. The root
-    scripts (main.py, ui.py) are compile-checked only: they are entry
-    points, not importable modules. Failures caused solely by a missing
-    third-party dependency are skipped (unverifiable in this env, not
-    a broken edit). Returns [(path, stderr_tail)]. Never raises.
+    import. Each changed module is imported in a fresh interpreter
+    with cwd=repo root — the same import the restart would do.
+    Parent packages are stubbed (empty __init__, real __path__) so
+    the test exercises THE MODULE's own imports rather than package
+    __init__ side effects. The root scripts are imported too, by
+    bare module name: ui.py is a library to main.py, and main.py's
+    __main__ guard means importing it runs its module level — every
+    import startup performs — without launching the app. Failures
+    caused solely by a missing third-party dependency are skipped
+    (unverifiable in this env, not a broken edit). Returns
+    [(path, stderr_tail)]. Never raises.
     """
     code = (
         "import sys, types, os, importlib\n"
@@ -305,8 +490,11 @@ def _smoke_import_changed(changed: List[str], root: Path) -> list:
             continue
         rel = os.path.relpath(p, str(root)).replace(os.sep, "/")
         parts = rel.split("/")
-        if len(parts) < 2 or parts[0] not in _PACKAGE_DIRS:
-            continue   # root script — compile was its whole test
+        if len(parts) >= 2 and parts[0] not in _PACKAGE_DIRS:
+            continue   # unreachable via the watched set; stay safe
+        # Root scripts import by bare module name (ui, main); package
+        # modules by dotted path. The subprocess runs at the repo
+        # root either way, so the import tried is startup's own.
         mod = rel[:-3].replace("/", ".")
         if mod.endswith(".__init__"):
             mod = mod[: -len(".__init__")]

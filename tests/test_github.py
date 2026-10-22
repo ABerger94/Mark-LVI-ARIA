@@ -19,7 +19,10 @@ from pathlib import Path
 import pytest
 
 import actions.github_create_repo as gcr
+import actions.github_list_files as glf
 import actions.github_push_file as gpf
+import actions.github_read_file as grf
+import actions.github_repo_info as gri
 import actions.github_setup as gsu
 from core import github
 from memory import config_manager as cm
@@ -175,5 +178,105 @@ def test_registry_lists_the_github_tools():
     reserved = {t["name"] for t in main.TOOL_DECLARATIONS}
     actions = discover_actions(ROOT / "actions", reserved_names=reserved,
                                logger=lambda msg: None)
-    for name in ("github_setup", "github_create_repo", "github_push_file"):
+    for name in ("github_setup", "github_create_repo", "github_push_file",
+                 "github_list_files", "github_read_file", "github_repo_info"):
         assert actions.has(name), name
+
+
+# ── the reads (connected is enough — arming is the write side) ───────────────
+
+def test_reads_refuse_when_not_connected(cfg, http):
+    for result in (glf.github_list_files({"repo": "x"}),
+                   grf.github_read_file({"repo": "x", "filepath": "a.py"}),
+                   gri.github_repo_info({"repo": "x"})):
+        assert result.startswith("status=failed"), result
+        assert "set up GitHub" in result, result
+    assert http.requests == []
+
+
+def test_list_files_works_while_disarmed(cfg, http):
+    """The pinned asymmetry: token stored, flag OFF — the write
+    tools refuse (see above) but a read goes through. Reviewing a
+    codebase must not require arming her."""
+    cm.save_github_credentials("tok-abc", "ABerger94")
+    assert github.state() == "disarmed"
+    http.get_payload = [
+        {"name": "core", "type": "dir", "size": 0},
+        {"name": "main.py", "type": "file", "size": 152340},
+    ]
+    result = glf.github_list_files({"repo": "Mark-LVI-Alek"})
+    assert result.startswith("status=done"), result
+    assert "core/" in result and "main.py" in result, result
+    assert "152,340" in result, result
+    assert "tok-abc" not in result
+    req = http.requests[-1]
+    assert req.method == "GET"
+    assert "/repos/ABerger94/Mark-LVI-Alek/contents" in req.full_url
+
+
+def test_read_file_decodes_base64(cfg, http):
+    cm.save_github_credentials("tok-abc", "ABerger94")
+    http.get_payload = {
+        "content": base64.b64encode(b"print('hi')\n").decode(),
+        "encoding": "base64", "size": 11}
+    result = grf.github_read_file({"repo": "notes", "filepath": "a.py"})
+    assert result.startswith("status=done"), result
+    assert "print('hi')" in result, result
+    assert "tok-abc" not in result
+    assert http.requests[-1].method == "GET"
+    assert "/repos/ABerger94/notes/contents/a.py" in \
+        http.requests[-1].full_url
+
+
+def test_read_file_truncates_with_the_total_stated(cfg, http):
+    cm.save_github_credentials("tok-abc", "ABerger94")
+    body = "y" * 13000
+    http.get_payload = {
+        "content": base64.b64encode(body.encode()).decode(),
+        "encoding": "base64", "size": 13000}
+    result = grf.github_read_file({"repo": "notes", "filepath": "big.txt"})
+    assert result.startswith("status=done"), result
+    assert "Truncated" in result and "13,000" in result, result
+    assert ("y" * 12000) in result            # the cap is shown…
+    assert ("y" * 12001) not in result         # …and not one char more
+
+
+def test_read_file_binary_is_named_not_dumped(cfg, http):
+    cm.save_github_credentials("tok-abc", "ABerger94")
+    http.get_payload = {
+        "content": base64.b64encode(bytes(range(256))).decode(),
+        "encoding": "base64", "size": 256}
+    result = grf.github_read_file({"repo": "notes", "filepath": "x.bin"})
+    assert result.startswith("status=done"), result
+    assert "binary" in result and "not text" in result, result
+
+
+def test_read_file_404_says_check_the_name(cfg, http):
+    cm.save_github_credentials("tok-abc", "ABerger94")
+    http.error = (404, b'{"message":"Not Found"}')
+    result = grf.github_read_file({"repo": "notes", "filepath": "nope.py"})
+    assert result.startswith("status=failed"), result
+    assert "couldn't find" in result and "404" in result, result
+
+
+def test_read_file_401_names_the_dead_token(cfg, http):
+    cm.save_github_credentials("tok-abc", "ABerger94")
+    http.error = (401, b'{"message":"Bad credentials"}')
+    result = glf.github_list_files({"repo": "notes"})
+    assert result.startswith("status=failed"), result
+    assert "401" in result and "token" in result, result
+    assert "tok-abc" not in result             # never echo the secret
+
+
+def test_repo_info_reports_the_facts(cfg, http):
+    cm.save_github_credentials("tok-abc", "ABerger94")
+    http.get_payload = {
+        "description": "the codebase", "default_branch": "main",
+        "language": "Python", "updated_at": "2026-10-22T09:00:00Z",
+        "open_issues_count": 3, "private": False}
+    result = gri.github_repo_info({"repo": "Mark-LVI-Alek"})
+    assert result.startswith("status=done"), result
+    assert "main" in result and "Python" in result, result
+    assert "public" in result and "3" in result, result
+    assert http.requests[-1].full_url.endswith(
+        "/repos/ABerger94/Mark-LVI-Alek")
