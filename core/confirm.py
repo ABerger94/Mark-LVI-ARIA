@@ -91,8 +91,8 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     """Park an irreversible action behind the on-screen gate.
 
     Returns the sentence the tool should hand back to the model — phrased as an
-    instruction so the assistant asks the user out loud in their own language,
-    rather than reading an English string verbatim."""
+    instruction so the assistant asks the user out loud, in English, in her
+    own words, rather than reading this string verbatim."""
     global _pending
 
     if in_trusted_scope():
@@ -133,7 +133,7 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     _log(f"SYS: Awaiting confirmation — {title}")
     return (
         f"[CONFIRMATION_PENDING] I have put a confirmation on screen for: {title}. "
-        f"Say ONE short sentence in the user's own language telling them you need "
+        f"Say ONE short sentence in English telling them you need "
         f"them to confirm it on the HUD before you do it. Do not claim it is done."
     )
 

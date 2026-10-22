@@ -842,7 +842,7 @@ class JarvisLive:
                 write_log=self.ui.write_log,
                 announce=lambda text: self.plugin_say(
                     "Announce this to the user now, in one short "
-                    "sentence, in their own language: " + text))
+                    "sentence, in English: " + text))
 
         def _work():
             try:
@@ -1095,8 +1095,8 @@ class JarvisLive:
         say something short WHILE its run() is still executing (plugins block
         their executor thread, so they can't speak through the tool response
         until they finish). The instruction is injected into the Live session
-        exactly like a proactive check-in; Gemini phrases it naturally in the
-        user's language. Silently a no-op when no session is connected.
+        exactly like a proactive check-in; Gemini phrases it naturally in
+        English. Silently a no-op when no session is connected.
         """
         loop = getattr(self, "_loop", None)
         if not loop or not self.session:
@@ -1624,6 +1624,10 @@ class JarvisLive:
                 sliding_window=types.SlidingWindow(),
             ),
             speech_config=types.SpeechConfig(
+                # English only, pinned at the voice layer as well as in
+                # [LANGUAGE]: the spoken language never follows the user's
+                # message or a stored memory entry.
+                language_code="en-US",
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name=get_voice()
@@ -2432,15 +2436,6 @@ class JarvisLive:
         engines (Gemini Live, the providers pipeline) implement the
         same send_client_content session interface.
         """
-        memory   = load_memory()
-        identity = memory.get("identity", {})
-
-        def _val(k: str) -> str:
-            e = identity.get(k, {})
-            return (e.get("value", "") if isinstance(e, dict) else str(e)).strip()
-
-        lang = _val("language")
-
         await asyncio.sleep(0.3)
         if not self.session:
             return
@@ -2459,10 +2454,6 @@ class JarvisLive:
             except Exception:
                 pass
 
-        lang_clause = (f" Speak this briefing in {lang}, then follow the "
-                       f"user's own language from their first reply onward."
-                       if lang else "")
-
         p = (
             "[STARTUP_BRIEFING] The briefing below was composed just now "
             "from the calendar, the inbox, the weather and the news. "
@@ -2470,7 +2461,7 @@ class JarvisLive:
             "voice — every fact in it and no facts beyond it: add "
             "nothing from memory or earlier conversation, and treat "
             "nothing as a plan unless it is written here. Do not call "
-            f"any tools.{lang_clause}\n\n{text}"
+            f"any tools.\n\n{text}"
         )
 
         await self.session.send_client_content(
@@ -2488,14 +2479,11 @@ class JarvisLive:
             return
         self._session_log = []    # reset immediately so the next session starts clean
 
-        memory = load_memory()
-        lang_entry = memory.get("identity", {}).get("language", {})
-        lang = (lang_entry.get("value", "") if isinstance(lang_entry, dict) else str(lang_entry)).strip()
-        lang = lang or "English"
-
+        # English always (see [LANGUAGE] in core/prompt.txt): a stored
+        # identity language never steers what she writes.
         convo = "\n".join(log[-40:])   # cap at last 40 turns to stay within token budget
         prompt = (
-            f"Summarize this conversation in 1-2 sentences in {lang}. "
+            "Summarize this conversation in 1-2 sentences in English. "
             "Focus on what the user accomplished or discussed. "
             "Output ONLY the summary text, nothing else:\n\n" + convo
         )
@@ -2505,7 +2493,7 @@ class JarvisLive:
                 gemini.text, prompt, gemini.SMART, None, 30_000,
             )
             if summary:
-                save_session_summary(summary, lang)
+                save_session_summary(summary, "English")
         except Exception as e:
             print(f"[Memory] ⚠️ Session summary failed: {e}")
 
@@ -2545,14 +2533,11 @@ class JarvisLive:
                 if not speaking and not recent_speech:
                     try:
                         alerts = await asyncio.to_thread(monitor_check_all)
-                        memory = load_memory()
-                        lang_e = memory.get("identity", {}).get("language", {})
-                        lang   = (lang_e.get("value", "") if isinstance(lang_e, dict) else str(lang_e)).strip() or "English"
                         for alert in alerts:
                             msg = (
                                 f"{alert}\n\n"
-                                f"Inform the user about this development naturally in {lang}. "
-                                "One brief sentence only."
+                                "Inform the user about this development naturally, "
+                                "in English. One brief sentence only."
                             )
                             await self.session.send_client_content(
                                 turns={"role": "user", "parts": [{"text": msg}]},
@@ -2671,7 +2656,7 @@ class JarvisLive:
             return True
         self.plugin_say(
             "Announce this to the user now, in one short sentence, "
-            "in their own language: " + text)
+            "in English: " + text)
         return True
 
     def _scheduler_run(self, prompt: str) -> bool:
@@ -2953,7 +2938,7 @@ class JarvisLive:
         self._failover_notice = None
         self.plugin_say(
             "Announce this to the user now, in one short sentence, in "
-            f"their own language: My Gemini connection is down, so I've "
+            f"English: My Gemini connection is down, so I've "
             f"switched to {label}. The conversation has restarted.")
 
     def _flush_pending_announce(self) -> None:
@@ -2970,7 +2955,7 @@ class JarvisLive:
         for text in queue:
             self.plugin_say(
                 "Announce this to the user now, in one short "
-                "sentence, in their own language: " + text)
+                "sentence, in English: " + text)
 
     def _resolve_engine_caps(self):
         """What the chosen engine can do — or None for Gemini Live.

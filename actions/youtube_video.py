@@ -182,7 +182,7 @@ def _summarize_with_gemini(transcript: str, video_url: str) -> str:
                 "Summarize YouTube video transcripts clearly and concisely. "
                 "Structure: 1-sentence overview, then 3-5 key points. "
                 "Be direct. Address the user as 'sir'. "
-                "Match the language of the transcript."
+                "Write the summary in English."
             )
         )
     )

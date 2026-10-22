@@ -146,7 +146,7 @@ def failed(action: str, reason: str, /, **facts: Any) -> str:
     "returncode 1".
     """
     out = _line(FAILED, action, {**facts, "reason": reason}) + (
-        " -- This did NOT happen. Tell the user so in their own language, with "
+        " -- This did NOT happen. Tell the user so in English, with "
         "the reason. Do not claim any part of it succeeded."
     )
     _record(FAILED, action, out)
@@ -178,8 +178,8 @@ def started(action: str, /, **facts: Any) -> str:
         the user can see it, and a second announcement is noise.
     """
     return _line(STARTED, action, facts) + (
-        " -- UNDER WAY, not finished. Say in one short sentence, in the user's "
-        "own language, that it is being done. Do not say it is complete, and "
+        " -- UNDER WAY, not finished. Say in one short sentence, in English, "
+        "that it is being done. Do not say it is complete, and "
         "do not call this tool again to check."
     )
 

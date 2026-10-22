@@ -423,12 +423,13 @@ def format_memory_for_prompt(memory: dict | None) -> str:
         if not val:
             continue
         if field == "language":
-            # Labelled as an observation, not a setting. A bare "Language:
-            # English" line written months ago reads like a standing order and
-            # was one of the reasons a Turkish question came back in English.
+            # Labelled as an observation, not a setting — and never an
+            # output instruction: her output is pinned to English (see
+            # [LANGUAGE] in core/prompt.txt) whatever this records. It
+            # stays in the prompt only so she knows what she may hear.
             core_lines.append(
-                f"Has spoken to you in: {val} (an observation about the past — "
-                f"always answer in the language of their CURRENT message)")
+                f"Has spoken to you in: {val} (an observation about the "
+                f"past — you always answer in English)")
         else:
             core_lines.append(f"{field.title()}: {val}")
     for key, entry in identity.items():

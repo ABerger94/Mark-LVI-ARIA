@@ -364,7 +364,7 @@ def open_app(parameters=None, response=None, player=None,
     # Facts, not a sentence. Handing the model a finished English sentence is
     # an invitation to repeat it verbatim — whatsapp_call.py has the receipt:
     # a request made in Turkish came back in English, padded with an offer
-    # nobody had made. The model writes the sentence, in the user's language.
+    # nobody had made. The model writes the sentence, in English.
     return outcome.started("open_app", app=spoken)
 
 

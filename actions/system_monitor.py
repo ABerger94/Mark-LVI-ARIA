@@ -167,7 +167,7 @@ class SystemMonitor:
             if self._cpu_streak >= _CPU_STREAK and self._can_alert("cpu"):
                 alerts.append(
                     f"[SYSTEM_ALERT] CPU usage has been critically high ({cpu:.0f}%) "
-                    "for several seconds. Warn the user in their language and suggest "
+                    "for several seconds. Warn the user in English and suggest "
                     "closing heavy applications."
                 )
                 self._record("cpu")
@@ -178,14 +178,14 @@ class SystemMonitor:
         if ram >= self.thresholds["ram"] and self._can_alert("ram"):
             alerts.append(
                 f"[SYSTEM_ALERT] RAM is at {ram:.0f}% — nearly exhausted. "
-                "Warn the user in their language and suggest freeing memory."
+                "Warn the user in English and suggest freeing memory."
             )
             self._record("ram")
 
         if temp > 0 and temp >= self.thresholds["temp"] and self._can_alert("temp"):
             alerts.append(
                 f"[SYSTEM_ALERT] CPU temperature is {temp:.0f}°C — above the safe limit. "
-                "Warn the user in their language and advise reducing system load "
+                "Warn the user in English and advise reducing system load "
                 "or checking cooling."
             )
             self._record("temp")
@@ -193,7 +193,7 @@ class SystemMonitor:
         if gpu >= 0 and gpu >= self.thresholds["gpu"] and self._can_alert("gpu"):
             alerts.append(
                 f"[SYSTEM_ALERT] GPU load is at {gpu:.0f}%. "
-                "Briefly inform the user in their language."
+                "Briefly inform the user in English."
             )
             self._record("gpu")
 

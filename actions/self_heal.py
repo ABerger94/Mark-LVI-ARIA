@@ -23,7 +23,7 @@ from core import outcome
 from core import selfheal
 
 _ANNOUNCE = ("Announce this to the user now, in one short sentence, "
-             "in their own language: ")
+             "in English: ")
 
 
 def self_heal(parameters: dict = None, player=None,

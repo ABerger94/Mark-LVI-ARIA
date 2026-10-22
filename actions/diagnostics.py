@@ -9,7 +9,7 @@ panel and the activity log, record an incident if anything failed,
 and announce the one-line summary through the UI's say channel —
 the same plugin_say seam the scheduler's timers and the engine
 failover notice speak through, so the sentence arrives in her
-voice, in the user's language, with the facts fixed.
+voice, in English, with the facts fixed.
 
 The tool declares scheduling SILENT: it has already announced
 itself, so its result is recorded without prompting the model to
@@ -24,7 +24,7 @@ from core import diagnostics as diag
 from core import outcome
 
 _ANNOUNCE = ("Announce this to the user now, in one short sentence, "
-             "in their own language: ")
+             "in English: ")
 
 
 def run_diagnostics(parameters: dict = None, player=None,

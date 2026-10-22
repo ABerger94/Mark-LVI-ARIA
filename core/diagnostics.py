@@ -523,7 +523,7 @@ def deliver(results: list[dict], show_content=None, write_log=None,
     [Diagnostics] log block, an incident ONLY on failure, and the
     spoken sentence through `announce` (the caller's announcement
     channel — plugin_say / request_say — which phrases the fixed
-    sentence in the user's language). Every sink is optional and
+    sentence in English). Every sink is optional and
     guarded: a broken panel must never cost the incident, and a
     broken log must never cost the speech."""
     report = render_report(results)

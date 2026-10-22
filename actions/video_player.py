@@ -223,7 +223,7 @@ def video_player(parameters: dict = None, response=None, player=None,
     threading.Thread(target=_play_youtube, args=(player, source, _begin_open()),
                      daemon=True, name="video-open").start()
     # Deliberately a status line rather than a finished English sentence: the
-    # model writes the words, in the user's own language.
+    # model writes the words, in English.
     return f"status=opening source={source}"
 
 
@@ -258,7 +258,7 @@ def _play_youtube(player, source: str, token: int) -> None:
         opened = " and it has been opened in the browser instead"
     except Exception:
         pass
-    _say(player, "Tell the user, in one short sentence in their own language: "
+    _say(player, "Tell the user, in one short sentence in English: "
                  f"'{source}' could not be played on the display "
                  f"({err}){opened}.")
 
