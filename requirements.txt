@@ -103,6 +103,13 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 #                            #   (also needs ffmpeg on PATH for most formats)
 #   pip install mediapipe    # pushup_counter: elbow-angle rep detection
 
+# ── Calendar recurrence (core/ical.py) ─────────────────────────────────────
+# python-dateutil's rrule expands recurring calendar events (RRULE/EXDATE/
+# RDATE) inside core/ical.py. It is imported there behind a guard: without
+# it the calendar still works — recurring events simply show their first
+# occurrence, ARIA's original behaviour.
+python-dateutil>=2.8,<3
+
 # ── MCP client (core/mcp_client.py) ────────────────────────────────────────
 # The Model Context Protocol SDK: tools from servers the user configures
 # (stdio commands or HTTP URLs) join her tool list, namespaced per server.
