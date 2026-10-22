@@ -94,13 +94,30 @@ protect. Set `backup_mirror_dir` (say "set the backup mirror to …", or use
 Google Drive — and every memory and config snapshot is copied there too,
 verified by size. A mirror that fails costs one incident, never the backup.
 
+**Self-updates.** Pulling new code used to change the files and nothing
+else — she kept running the old code until somebody restarted her. A
+standalone sidecar (`updater.py`, spawned detached at startup, importing
+nothing from the app so it works when she can't) polls GitHub about once
+a minute. A new commit is pulled fast-forward only over a clean tracked
+tree — a dirty tree is announced once and left alone, never forced or
+stashed — and the new code is smoke-imported before she is restarted on
+it, the same import check her self-edit gate runs. When she is awake the
+restart announces itself first ("Update ready: …. Restarting in 60
+seconds — say wait to hold."); a hold defers it. A `git pull` done under
+her — by hand, or by ARIA herself through the shell tool — is caught the
+same way, by comparing the disk to the boot stamp she writes at startup.
+If the new code does not boot healthy, the sidecar rolls back to the
+last known-good commit, restarts her on that, and says so. `update_status`
+reports the sidecar's record; `"auto_update_enabled": false` in config
+turns the whole thing off, checked every poll.
+
 ---
 
 ## Capabilities
 
-**90 tools** on a desktop install — 9 built in, 80 actions, plus
+**91 tools** on a desktop install — 9 built in, 81 actions, plus
 `youtube_video`, which only loads when a display is present. (A headless
-registry walk counts 89.) Tools from connected MCP servers join on top of
+registry walk counts 90.) Tools from connected MCP servers join on top of
 that, namespaced per server. The in-app **⌘ COMMANDS** overlay is the source
 of truth: it is rebuilt from the live registries every time it opens, so it
 cannot list a tool she doesn't have. The shape of the suite:
@@ -117,7 +134,7 @@ cannot list a tool she doesn't have. The shape of the suite:
 | MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` (a server connected mid-session offers its tools from the next session build) |
 | Watches | price watches (`watch_price`, `check_price_watches`, `list_price_watches`, `unwatch_price` — checks ride the scheduler), screen watches (`watch_screen`, `unwatch_screen`, `list_screen_watches`), news topic monitors (`manage_monitor`) |
 | Notes & cards | `take_note`, `read_notes`, `journal_write`; `mtg_card`, `mtg_advice` (Scryfall, keyless) |
-| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
+| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `update_status` (the self-update sidecar's record — read-only; nothing can trigger an update by tool), `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
 
 **Startup briefing.** On launch she greets you with a briefing composed in
 code — calendar, triaged inbox, weather, headlines from your monitored
@@ -361,7 +378,8 @@ Layout, briefly: `main.py` (session, dispatch, startup briefing),
 `ui.py` (the HUD), `core/` (prompt, gemini ladders, confirm, outcome,
 commands, scheduler, routines, self-edit, playback writer, watchdog,
 self-heal, backup mirror, delegation, MCP client,
-gmail/ical/github/spotify cores),
+gmail/ical/github/spotify cores), `updater.py` (the self-update
+sidecar — standalone, stdlib + git only),
 `actions/` (one file per tool, self-describing), `providers/` (the opt-in
 pipeline), `memory/` (store, config, embeddings), `dashboard/` (phone UI),
 `tools/` (the ARIA memory importer).

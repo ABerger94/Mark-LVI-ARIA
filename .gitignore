@@ -64,3 +64,13 @@ desktop.ini
 logs/
 downloads/
 screenshots/
+
+# ── Self-update sidecar state (updater.py) ─────────────────────────────
+# Written by the app and the sidecar at runtime; the updater's own
+# record must never be swept into the code it pulls.
+memory/updater_state.json
+memory/boot_stamp.json
+memory/app_presence.json
+memory/announce_drop.jsonl
+memory/updater.lock
+memory/update_hold

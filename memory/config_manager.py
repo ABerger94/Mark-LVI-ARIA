@@ -516,6 +516,25 @@ def save_watchdog_enabled(enabled: bool) -> None:
     data["watchdog_enabled"] = bool(enabled)
     write_config(data)
 
+# ── Self-updates ─────────────────────────────────────────────────────
+# Whether the updater sidecar (updater.py, spawned detached at
+# startup) may pull new code from origin and restart her on it:
+# announce-first when she is awake, a clean-tree gate, a
+# smoke-import before any restart, and a rollback to the last
+# known-good commit when the new code doesn't boot healthy. On
+# unless explicitly switched off (the watchdog_enabled idiom) — the
+# sidecar re-reads this flag every poll, so the switch takes effect
+# without restarting anything.
+
+def get_auto_update_enabled() -> bool:
+    return bool(load_api_keys().get("auto_update_enabled", True))
+
+
+def save_auto_update_enabled(enabled: bool) -> None:
+    data = load_api_keys()
+    data["auto_update_enabled"] = bool(enabled)
+    write_config(data)
+
 
 # ── Backup mirror ──────────────────────────────────────────────────────
 # Where the rolling backups are ALSO copied (core/backup_mirror.py):

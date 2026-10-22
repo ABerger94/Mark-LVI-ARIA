@@ -76,7 +76,7 @@ from actions                   import morning_briefing as _briefing
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
-    get_watchdog_enabled,
+    get_watchdog_enabled, get_auto_update_enabled,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
 )
 from core                     import gemini as _gemini
@@ -897,7 +897,7 @@ class JarvisLive:
     _DELEGATED_EXCLUDE = frozenset({
         "delegate_task", "shutdown_jarvis", "run_routine",
         "edit_own_code", "patch_own_code", "run_shell_command",
-        "notify_phone",
+        "notify_phone", "update_status",
     })
 
     def _execute_delegated_step(self, name: str, args: dict) -> str:
@@ -1464,6 +1464,27 @@ class JarvisLive:
         while True:
             watchdog_core.beat("loop")
             await asyncio.sleep(2)
+
+    async def _updater_link_loop(self) -> None:
+        """The app side of the self-update seam (core/updater_link):
+        every few seconds, refresh the presence file the sidecar's
+        announce-first decision reads, and drain its queued
+        announcements through _scheduler_say — the scheduler's own
+        queue, so an announcement dropped while she sleeps is
+        spoken on wake like any other. Runs for the life of the
+        process; the link module never raises, and neither does
+        this loop."""
+        from core import updater_link as _updater_link
+        while True:
+            try:
+                _updater_link.write_presence(
+                    BASE_DIR, awake=bool(self._awake),
+                    session_live=bool(self.session))
+                _updater_link.drain_announcements(
+                    BASE_DIR, self._scheduler_say)
+            except Exception:
+                pass
+            await asyncio.sleep(10)
 
     def _restart_for_watchdog(self):
         """Relaunch after a wedged loop, called from the watchdog's
@@ -3138,6 +3159,27 @@ class JarvisLive:
                 asyncio.create_task(self._run_watchdog_heartbeat())
         except Exception as e:
             print(f"[Watchdog] ⚠️ not armed: {e}")
+
+        # Self-update sidecar (updater.py): stamp this boot so the
+        # sidecar can tell the code she booted with from the code on
+        # disk, spawn the sidecar detached (its lockfile makes the
+        # spawn a no-op when one is already watching), and run the
+        # link loop that keeps her presence fresh and drains the
+        # sidecar's announcements into the scheduler's queue. The
+        # sidecar is gated by "auto_update_enabled" in config — off
+        # means nothing here spawns and it idles. Guarded like the
+        # watchdog: a broken link must never cost her startup.
+        try:
+            from core import updater_link as _updater_link
+            _updater_link.write_boot_stamp(BASE_DIR)
+            if get_auto_update_enabled() \
+                    and _updater_link.spawn_updater(BASE_DIR):
+                self.ui.write_log(
+                    "SYS: Self-update sidecar running — new code "
+                    "announces itself before it restarts me.")
+            asyncio.create_task(self._updater_link_loop())
+        except Exception as e:
+            print(f"[Updater] ⚠️ link not started: {e}")
 
         # Delegated background tasks (core/delegation.py): prompts
         # the model works on without the conversation, through the
