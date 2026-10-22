@@ -76,7 +76,7 @@ from actions                   import morning_briefing as _briefing
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
-    get_watchdog_enabled, get_auto_update_enabled,
+    get_watchdog_enabled,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
 )
 from core                     import gemini as _gemini
@@ -87,10 +87,10 @@ from core                      import routines as routines_core
 from core                      import scheduler as scheduler_core
 from core                      import diagnostics as diagnostics_core
 from core                      import watchdog as watchdog_core
+from core                      import codewatch as codewatch_core
 from core                      import delegation as delegation_core
 from core                      import notify as notify_core
 from core                      import mcp_client as mcp_client_core
-from core.selfedit             import SelfEditWatcher
 from types                     import SimpleNamespace
 from core                      import audio_devices
 from core.action_loader        import discover_actions
@@ -674,14 +674,17 @@ class JarvisLive:
         # queued lines through it. None until bound — a session that
         # never bound it (tests, headless) queues exactly as before.
         self._notify_hook = None
-        # Self-edit watcher (Phase D — ARIA's P4 loop, core/selfedit.py).
+        # Code watcher (core/codewatch.py — the old ARIA's in-process
+        # watcher, ported 2026-10-22; it retires the updater sidecar).
         # It snapshots her own source tree NOW, at boot; after every
         # completed turn the receive loop asks it to check (see
-        # _maybe_check_self_edit). Announcing goes through speak(), the
+        # _maybe_check_codewatch). Announcing goes through speak(), the
         # restart through _restart_after_self_edit — announced in her
-        # voice, never confirm-gated, exactly as ARIA's self-restart was.
-        self._selfedit_busy        = False
-        self._selfedit             = SelfEditWatcher(
+        # voice, never confirm-gated, exactly as ARIA's self-restart
+        # was. run() stamps the boot into its ledger (mark_boot) where
+        # the sidecar's boot stamp used to be written.
+        self._codewatch_busy       = False
+        self._codewatch            = codewatch_core.CodeWatcher(
             announce=self.speak,
             restart=self._restart_after_self_edit,
             speech_idle=lambda: not self._is_speaking,
@@ -1398,8 +1401,8 @@ class JarvisLive:
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"{tool_name} encountered an error. {short}")
 
-    def _maybe_check_self_edit(self):
-        """Post-turn self-edit check, called from the receive loop's
+    def _maybe_check_codewatch(self):
+        """Post-turn code-watch check, called from the receive loop's
         turn_complete handling — the ONE completion path both engines
         share: providers/base.py's contract is that a pipeline turn ends
         with the same server_content.turn_complete a Live turn does, so
@@ -1407,18 +1410,18 @@ class JarvisLive:
         itself (hashing the tree, compiling, a subprocess smoke import)
         runs on a worker thread — the receive loop must never wait for
         it, and while speech is playing out the restart it may arm
-        waits for the speaking to finish on the watcher's own timer."""
-        if self._selfedit_busy:
+        waits for the speaking to finish on the watcher's own thread."""
+        if self._codewatch_busy:
             return
-        self._selfedit_busy = True
+        self._codewatch_busy = True
 
         async def _run():
             try:
-                await asyncio.to_thread(self._selfedit.check)
+                await asyncio.to_thread(self._codewatch.check_after_turn)
             except Exception:
                 pass
             finally:
-                self._selfedit_busy = False
+                self._codewatch_busy = False
 
         asyncio.create_task(_run())
 
@@ -1465,27 +1468,6 @@ class JarvisLive:
             watchdog_core.beat("loop")
             await asyncio.sleep(2)
 
-    async def _updater_link_loop(self) -> None:
-        """The app side of the self-update seam (core/updater_link):
-        every few seconds, refresh the presence file the sidecar's
-        announce-first decision reads, and drain its queued
-        announcements through _scheduler_say — the scheduler's own
-        queue, so an announcement dropped while she sleeps is
-        spoken on wake like any other. Runs for the life of the
-        process; the link module never raises, and neither does
-        this loop."""
-        from core import updater_link as _updater_link
-        while True:
-            try:
-                _updater_link.write_presence(
-                    BASE_DIR, awake=bool(self._awake),
-                    session_live=bool(self.session))
-                _updater_link.drain_announcements(
-                    BASE_DIR, self._scheduler_say)
-            except Exception:
-                pass
-            await asyncio.sleep(10)
-
     def _restart_for_watchdog(self):
         """Relaunch after a wedged loop, called from the watchdog's
         supervisor thread. The self-edit restart's shape — spawn the
@@ -1495,6 +1477,14 @@ class JarvisLive:
         would queue forever, and a summary it cannot produce is not
         worth a corpse. The watchdog's incident record, written
         before this is called, is the evidence instead."""
+        # The shared restart guard (core/codewatch.py): if the code
+        # watcher already armed a restart, this process is already
+        # going away on that schedule — a second relaunch racing it
+        # could leave two of her running. First armer wins.
+        if not codewatch_core.PROCESS_ARBITER.try_arm("watchdog"):
+            print("[Watchdog] restart suppressed — a restart is "
+                  "already armed.")
+            return
         import os as _os
         import subprocess as _sp
         script = _os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
@@ -2220,11 +2210,11 @@ class JarvisLive:
                                     self.ui.stop_camera_stream()
                                 asyncio.create_task(_cam_close())
 
-                            # Self-edit watcher (Phase D): a turn that
-                            # changed her own code ends here — validate
-                            # it, announce it, restart or restore. See
-                            # core/selfedit.py.
-                            self._maybe_check_self_edit()
+                            # Code watcher (core/codewatch.py): a turn
+                            # that changed her own code ends here —
+                            # validate it, announce it, restart or
+                            # restore. See _maybe_check_codewatch.
+                            self._maybe_check_codewatch()
 
                     if response.tool_call:
                         fn_responses = []
@@ -3163,26 +3153,21 @@ class JarvisLive:
         except Exception as e:
             print(f"[Watchdog] ⚠️ not armed: {e}")
 
-        # Self-update sidecar (updater.py): stamp this boot so the
-        # sidecar can tell the code she booted with from the code on
-        # disk, spawn the sidecar detached (its lockfile makes the
-        # spawn a no-op when one is already watching), and run the
-        # link loop that keeps her presence fresh and drains the
-        # sidecar's announcements into the scheduler's queue. The
-        # sidecar is gated by "auto_update_enabled" in config — off
-        # means nothing here spawns and it idles. Guarded like the
-        # watchdog: a broken link must never cost her startup.
+        # Code watcher boot record (core/codewatch.py): the watcher
+        # was built at startup — its boot snapshot is her source tree
+        # as this process found it — and here, where the retired
+        # updater sidecar's boot stamp used to be written, run()
+        # stamps the boot into the watcher's ledger: the record
+        # update_status reads back. Guarded like the watchdog: a
+        # broken ledger must never cost her startup.
         try:
-            from core import updater_link as _updater_link
-            _updater_link.write_boot_stamp(BASE_DIR)
-            if get_auto_update_enabled() \
-                    and _updater_link.spawn_updater(BASE_DIR):
-                self.ui.write_log(
-                    "SYS: Self-update sidecar running — new code "
-                    "announces itself before it restarts me.")
-            asyncio.create_task(self._updater_link_loop())
+            self._codewatch.mark_boot()
+            self.ui.write_log(
+                "SYS: Code watcher running — my code is checked "
+                "after every turn; changes announce themselves "
+                "before I restart.")
         except Exception as e:
-            print(f"[Updater] ⚠️ link not started: {e}")
+            print(f"[CodeWatch] ⚠️ boot record failed: {e}")
 
         # Delegated background tasks (core/delegation.py): prompts
         # the model works on without the conversation, through the
