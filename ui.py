@@ -4823,7 +4823,7 @@ class RemoteKeyOverlay(QWidget):
 
     def __init__(self, url: str, key: str, auto_login_url: str = "",
                  manual_url: str = "", expiry_secs: int = 600, parent=None,
-                 bind_error: str = ""):
+                 bind_error: str = "", assistant_name: str = "ARIA"):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"""
@@ -4833,6 +4833,8 @@ class RemoteKeyOverlay(QWidget):
                 border-radius: 14px;
             }}
         """)
+        self._assistant_name  = (assistant_name or "ARIA").strip() or "ARIA"
+        self._fw_warn         = None
         self._expiry          = time.time() + expiry_secs
         self._on_new_key      = None
         self._auto_login_url  = auto_login_url
@@ -4901,12 +4903,13 @@ class RemoteKeyOverlay(QWidget):
         if _blocked:
             warn = _lbl(
                 "⚠  Windows is blocking incoming connections to this copy of "
-                "Python, so your phone cannot reach this page. Restart JARVIS "
+                f"Python, so your phone cannot reach this page. Restart {self._assistant_name} "
                 "and accept the Windows prompt, or remove the rules named "
                 + ", ".join(sorted({n for n, _ in _blocked}))
                 + " under Windows Defender Firewall → Inbound Rules.",
                 8, color="#f4b942")
             lay.addWidget(warn)
+            self._fw_warn = warn
 
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
@@ -5026,6 +5029,8 @@ class RemoteKeyOverlay(QWidget):
     def mark_connected(self) -> None:
         """Call from any thread when a phone successfully connects."""
         self._ctimer.stop()
+        if self._fw_warn is not None:
+            self._fw_warn.hide()   # a connected phone disproves the warning
         self._key_lbl.setText("CONNECTED")
         self._key_lbl.setStyleSheet(f"""
             color: {C.GREEN};
@@ -5040,7 +5045,7 @@ class RemoteKeyOverlay(QWidget):
         self._qr_label.setStyleSheet(
             "color: #00ff88; background: #001a0d; border-radius: 10px;"
         )
-        self._timer_lbl.setText("Phone connected — JARVIS ready")
+        self._timer_lbl.setText(f"Phone connected — {self._assistant_name} ready")
         self._timer_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
 
     def _refresh_key(self):
@@ -7142,7 +7147,8 @@ class MainWindow(QMainWindow):
         ow, oh = RemoteKeyOverlay._OW, RemoteKeyOverlay._OH
         ov  = RemoteKeyOverlay(url, key, auto_login_url=auto, manual_url=manual,
                                expiry_secs=600, parent=cw,
-                               bind_error=berr)
+                               bind_error=berr,
+                               assistant_name=self._assistant_name)
         ov.set_new_key_callback(self.on_remote_clicked)
         ov.setGeometry(
             (cw.width()  - ow) // 2,
