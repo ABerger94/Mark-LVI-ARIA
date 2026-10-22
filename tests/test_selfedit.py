@@ -1,4 +1,5 @@
-"""Phase D (P4) — the self-edit loop.
+"""Phase D (P4) — the self-edit tools, the read-before-edit gate, and
+the validation primitives.
 
 The failure being pinned shut is the one ARIA shipped until her
 2026-10-21 fix package: her only write tool was sandboxed away from
@@ -6,20 +7,21 @@ her own source, so "editing her code" wrote a copy somewhere the
 restart watcher never looked — nothing validated, nothing announced,
 nothing restarted, and the user told it had been.
 
-Here the loop is tested end to end against a fixture tree: the tools
-write only inside the allowlist (which is the watched set), the
-watcher notices changes no matter which tool made them (it hashes
-files; it does not watch tool calls), good changes arm an announced
-restart, and broken changes are restored from git — with the incident
-on record — instead of being restarted into.
+The turn-end watcher itself now lives in core/codewatch.py
+(CodeWatcher, tested in tests/test_codewatch.py); it composes the
+primitives kept in core/selfedit.py. This file pins those halves: the
+tools write only inside the allowlist (which is the watched set), the
+read-before-edit gate refuses until the file has been read in full at
+its current hash, and the validation primitives — compile is not
+enough, so every changed file is smoke-imported, and a broken file
+is restored from git.
 """
 import subprocess
-import threading
 from pathlib import Path
 
 import pytest
 
-from core import incidents, selfedit
+from core import selfedit
 
 
 # ── fixture tree ────────────────────────────────────────────────────────────
@@ -54,13 +56,6 @@ def tree(tmp_path: Path) -> Path:
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "fixture")
     return tmp_path
-
-
-def _watcher(tree: Path, **kw) -> selfedit.SelfEditWatcher:
-    kw.setdefault("announce", lambda text: None)
-    kw.setdefault("restart", lambda: None)
-    kw.setdefault("speech_idle", lambda: True)
-    return selfedit.SelfEditWatcher(root=tree, **kw)
 
 
 def _read_fully(tree: Path, rel: str) -> None:
@@ -153,142 +148,72 @@ def test_patch_own_code_refuses_non_unique(tree):
         encoding="utf-8")                    # untouched
 
 
-# ── the watcher ─────────────────────────────────────────────────────────────
+# ── validation primitives: EVERY file is import-checked ─────────────────────
 
-def test_watcher_clean_tree_does_nothing(tree):
-    said, restarted = [], threading.Event()
-    w = _watcher(tree, announce=said.append,
-                 restart=restarted.set)
-    assert w.check() == "clean"
-    assert said == []
-    assert not restarted.wait(0.2)
+def _smoke(tree: Path, *rels: str):
+    return selfedit._smoke_import_changed(
+        [str(tree / rel) for rel in rels], tree)
 
 
-def test_watcher_catches_general_file_write_and_restarts(tree):
-    """The point of hash-watching: an edit made with a plain file
-    write — her general file tools, not the self-edit tools — is
-    still caught, announced, and loaded by restart."""
-    said, restarted = [], threading.Event()
-    w = _watcher(tree, announce=said.append, restart=restarted.set)
-    _write(tree, "core/mod.py", "VALUE = 2\n")          # no tool involved
-    assert w.check() == "restart_armed"
-    assert said == ["My code changed — restarting now to load the "
-                    "new version."]
-    assert restarted.wait(10), "restart callback never fired"
-
-
-def test_watcher_persona_edit_restarts(tree):
-    said, restarted = [], threading.Event()
-    w = _watcher(tree, announce=said.append, restart=restarted.set)
-    _write(tree, "core/prompt.txt", "You are ARIA, revised.\n")
-    assert w.check() == "restart_armed"
-    assert restarted.wait(10)
-
-
-def test_watcher_restores_broken_edit_and_records_incident(
-        tree, monkeypatch):
-    log = tree / "incidents.jsonl"
-    monkeypatch.setattr(incidents, "INCIDENTS_PATH", log)
-    said, restarted = [], threading.Event()
-    w = _watcher(tree, announce=said.append, restart=restarted.set)
-    _write(tree, "core/mod.py", "VALUE = (\n")          # syntax error
-    assert w.check() == "restored_restart_armed"
-    # The committed version is back; the broken one is kept beside it.
-    assert (tree / "core/mod.py").read_text(
-        encoding="utf-8") == "VALUE = 1\n"
-    assert list(tree.glob("core/mod.py.broken-*"))
-    assert any("restored the last working mod.py" in s for s in said)
-    # The failure is on the durable record, classified.
-    records = incidents.recent(5)
-    assert any(r["kind"] == "self_edit_broken" for r in records)
-    # ARIA's semantics: she restarts into the RESTORED tree — never
-    # into the broken code, which is no longer on disk by now.
-    assert restarted.wait(10)
-
-
-def test_watcher_restores_import_broken_edit(tree, monkeypatch):
-    """Compiles fine, dies at import — the case py_compile alone
-    cannot see, and the reason the smoke import exists."""
-    monkeypatch.setattr(incidents, "INCIDENTS_PATH",
-                        tree / "incidents.jsonl")
-    w = _watcher(tree)
-    _write(tree, "core/mod.py", "import core.no_such_module_xyz\n")
-    assert w.check() == "restored_restart_armed"
-    assert (tree / "core/mod.py").read_text(
-        encoding="utf-8") == "VALUE = 1\n"
-
-
-def test_watcher_ignores_missing_third_party_dep(tree):
-    """An import that fails only because an external package is absent
-    on this machine is an environment gap, not a broken edit — ARIA's
-    rule, kept: flagging it would restore good edits forever."""
-    restarted = threading.Event()
-    w = _watcher(tree, restart=restarted.set)
-    _write(tree, "core/mod.py",
-           "import some_third_party_pkg_that_does_not_exist_xyz\n")
-    assert w.check() == "restart_armed"
-    assert restarted.wait(10)
-
-
-def test_watcher_unrestorable_break_announces_and_does_not_restart(tree):
-    """A brand-new file has nothing committed to restore TO. The
-    watcher says the code is broken and does not restart into it."""
-    said, restarted = [], threading.Event()
-    w = _watcher(tree, announce=said.append, restart=restarted.set)
-    _write(tree, "core/new_broken.py", "def broken(:\n")
-    assert w.check() == "restore_failed"
-    assert any("new version is broken" in s for s in said)
-    assert not restarted.wait(0.5)
-    # And it does not re-announce the same break on every later turn:
-    # a restart is not pending, but the file still differs from the
-    # boot snapshot — ARIA re-checked too; what matters is the first
-    # response was honest and nothing restarted into broken code.
-    assert (tree / "core/new_broken.py").exists()
-
-
-# ── validation: EVERY file is import-checked ────────────────────────────────
-
-def test_watcher_restores_import_broken_ui_edit(tree, monkeypatch):
-    """The 2026-10-22 break, replayed: a ui.py that compiles but dies
-    at module level — a class subclassing an attribute a module does
-    not have (the invented-framework shape). Root scripts used to be
-    compile-checked only, so this restarted her into the crash; now
-    ui.py is smoke-imported like everything else and restored."""
-    monkeypatch.setattr(incidents, "INCIDENTS_PATH",
-                        tree / "incidents.jsonl")
-    w = _watcher(tree)
+def test_smoke_import_flags_ui_edit_that_dies_at_import(tree):
+    """The 2026-10-22 break, replayed at the primitive CodeWatcher
+    composes: a ui.py that compiles but dies at module level — a class
+    subclassing an attribute a module does not have (the invented-
+    framework shape). Root scripts used to be compile-checked only,
+    so this restarted her into the crash; the smoke import catches it
+    here instead."""
     _write(tree, "ui.py",
            "import core.mod as _m\n\n\n"
            "class HUDReactorCore(_m.View):\n    pass\n")
-    assert w.check() == "restored_restart_armed"
-    assert (tree / "ui.py").read_text(encoding="utf-8") == "print('ui')\n"
+    failed = _smoke(tree, "ui.py")
+    assert [Path(p).name for p, _ in failed] == ["ui.py"]
 
 
-def test_watcher_restores_import_broken_main_edit(tree, monkeypatch):
+def test_smoke_import_flags_main_edit_that_dies_at_import(tree):
     """main.py gets the same treatment: importing it runs its module
     level (the __main__ guard keeps the app from launching), so a
     module-level NameError is caught by validation, not by the
     restart crashing into it."""
-    monkeypatch.setattr(incidents, "INCIDENTS_PATH",
-                        tree / "incidents.jsonl")
-    w = _watcher(tree)
     _write(tree, "main.py", "VALUE = undefined_name_xyz\n")
-    assert w.check() == "restored_restart_armed"
-    assert (tree / "main.py").read_text(
-        encoding="utf-8") == "print('entry')\n"
+    failed = _smoke(tree, "main.py")
+    assert [Path(p).name for p, _ in failed] == ["main.py"]
 
 
-def test_watcher_valid_main_and_ui_edits_pass(tree):
+def test_smoke_import_passes_valid_edits_and_never_runs_main(tree):
     """A main.py whose main() would explode if RUN proves the smoke
     import does not launch the app; a valid ui.py edit passes too."""
-    restarted = threading.Event()
-    w = _watcher(tree, restart=restarted.set)
     _write(tree, "main.py",
            "def main():\n    raise SystemExit('must not run on import')\n"
            "\n\nif __name__ == '__main__':\n    main()\n")
     _write(tree, "ui.py", "VALUE = 'valid ui'\n")
-    assert w.check() == "restart_armed"
-    assert restarted.wait(10)
+    assert _smoke(tree, "main.py", "ui.py") == []
+
+
+def test_smoke_import_exempts_missing_third_party_dep(tree):
+    """An import that fails only because an external package is absent
+    on this machine is an environment gap, not a broken edit — ARIA's
+    rule, kept: flagging it would restore good edits forever."""
+    _write(tree, "core/mod.py",
+           "import some_third_party_pkg_that_does_not_exist_xyz\n")
+    assert _smoke(tree, "core/mod.py") == []
+
+
+def test_restore_last_committed_brings_back_committed_version(tree):
+    target = _write(tree, "core/mod.py", "VALUE = (\n")  # syntax error
+    backup = selfedit._restore_last_committed(str(target), tree)
+    # The committed version is back; the broken one is kept beside it.
+    assert backup is not None and Path(backup).exists()
+    assert target.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert list(tree.glob("core/mod.py.broken-*"))
+
+
+def test_restore_last_committed_returns_none_for_uncommitted_file(tree):
+    """A brand-new file has nothing committed to restore TO: restore
+    reports failure and the broken file is left in place, exactly as
+    before."""
+    target = _write(tree, "core/new_broken.py", "def broken(:\n")
+    assert selfedit._restore_last_committed(str(target), tree) is None
+    assert target.exists()
 
 
 # ── the read-before-edit gate ───────────────────────────────────────────────

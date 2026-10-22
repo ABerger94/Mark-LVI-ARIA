@@ -39,10 +39,13 @@ THE RESTART ITSELF
 
     LVI has no app-restart lifecycle to reuse — the only exits are
     shutdown_jarvis (os._exit) and the PC restart in computer_settings
-    (confirm-gated, and it restarts the COMPUTER). So the watcher takes
-    a `restart` callback; main.py supplies one that mirrors the shutdown
-    path's shape (save the session summary, relaunch this same script,
-    exit). It is deliberately NOT routed through core/confirm.py: the
+    (confirm-gated, and it restarts the COMPUTER). The turn-end
+    watcher that drives the restart now lives in core/codewatch.py
+    (CodeWatcher): it composes the validation and restore machinery
+    below, and on a passing change main.py relaunches this same
+    script and exits — the shutdown path's shape (save the session
+    summary, relaunch, exit). The restart is deliberately NOT
+    routed through core/confirm.py: the
     announcement IS the notice, exactly as ARIA's self-restart was
     announced-not-gated.
 
@@ -92,12 +95,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
-
-try:
-    from core import incidents
-except Exception:  # pragma: no cover — incidents must never block an edit
-    incidents = None
+from typing import Dict, List, Optional, Tuple
 
 
 def _base_dir() -> Path:
@@ -511,146 +509,3 @@ def _smoke_import_changed(changed: List[str], root: Path) -> list:
         except Exception as e:
             failed.append((p, str(e)[:200]))
     return failed
-
-
-# ── The watcher ─────────────────────────────────────────────────────────────
-
-class SelfEditWatcher:
-    """Boot-snapshot hash watcher. main.py builds one at startup and
-    calls check() after every completed turn (from the one receive loop
-    both engines share). Callbacks keep this class testable and keep
-    main.py's lifecycle (speak / relaunch) where it belongs:
-
-        announce(text)  — say it in her voice (main.py's speak)
-        restart()       — perform the relaunch (main.py supplies it)
-        speech_idle()   — True when nothing is being spoken, so the
-                          restart waits for her to finish the sentence
-                          (ARIA waited on her speech queues; this is
-                          the same wait against LVI's speaking flag)
-    """
-
-    def __init__(self,
-                 root: Optional[Path] = None,
-                 announce: Optional[Callable[[str], None]] = None,
-                 restart: Optional[Callable[[], None]] = None,
-                 speech_idle: Optional[Callable[[], bool]] = None):
-        self.root = Path(root) if root else _base_dir()
-        self._announce = announce or (lambda text: None)
-        self._restart = restart or (lambda: None)
-        self._speech_idle = speech_idle
-        self._boot = snapshot_hashes(self.root)
-        self._lock = threading.Lock()
-        self._checking = False
-        self._restart_pending = False
-        self._restart_timer: Optional[threading.Timer] = None
-
-    # -- internals -----------------------------------------------------------
-
-    def _record(self, kind: str, message: str) -> None:
-        if incidents is not None:
-            incidents.record("selfedit", kind, message)
-
-    def _arm_restart(self) -> None:
-        self._restart_pending = True
-
-        def _waiter():
-            if self._speech_idle is not None:
-                deadline = time.time() + 120
-                while time.time() < deadline:
-                    try:
-                        if self._speech_idle():
-                            break
-                    except Exception:
-                        break
-                    time.sleep(0.5)
-            time.sleep(2.0)
-            try:
-                self._restart()
-            except Exception as e:
-                print(f"[SelfEdit] restart callback failed: {e}")
-
-        self._restart_timer = threading.Timer(0.5, _waiter)
-        self._restart_timer.daemon = True
-        self._restart_timer.start()
-
-    # -- the check ------------------------------------------------------------
-
-    def check(self) -> str:
-        """One post-turn check. Returns a short status string:
-        "clean" | "restart_armed" | "restored_restart_armed" |
-        "restore_failed" | "busy" | "restart_pending". Never raises —
-        it runs inside the conversation's receive loop."""
-        with self._lock:
-            if self._checking:
-                return "busy"
-            if self._restart_pending:
-                return "restart_pending"
-            self._checking = True
-        try:
-            return self._check_inner()
-        except Exception as e:
-            print(f"[SelfEdit] check failed: {e}")
-            return "clean"
-        finally:
-            with self._lock:
-                self._checking = False
-
-    def _check_inner(self) -> str:
-        cur = snapshot_hashes(self.root)
-        # Deleted files are skipped (absent from cur): the running
-        # process still holds the module in memory. Restarting into a
-        # tree with a missing module would just crash the new process.
-        changed = [p for p in cur if cur[p] != self._boot.get(p)]
-        if not changed:
-            return "clean"
-
-        bad = []  # (path, reason) for files that would crash the restart
-        for p in changed:
-            if p.endswith(".py") and os.path.isfile(p):
-                try:
-                    py_compile.compile(p, doraise=True)
-                except Exception as e:
-                    bad.append((p, f"syntax error: {e}"))
-        if not bad:
-            # Parses clean but may still fail at import (wrong module,
-            # bad dependency). Catch it here instead of crash-looping
-            # the restart.
-            for p, err in _smoke_import_changed(changed, self.root):
-                bad.append((p, f"import failed: {err}"))
-
-        for p, reason in bad:
-            print(f"[SelfEdit] restart blocked: {reason} in "
-                  f"{os.path.basename(p)}")
-            restored = _restore_last_committed(p, self.root)
-            if not restored:
-                self._record(
-                    "self_edit_restore_failed",
-                    f"{os.path.basename(p)}: {reason}; restore failed")
-                self._announce(
-                    f"My code changed but the new version is broken "
-                    f"({reason}).")
-                return "restore_failed"
-            self._record(
-                "self_edit_broken",
-                f"{os.path.basename(p)}: {reason}; restored from git, "
-                f"broken copy kept as {os.path.basename(restored)}")
-            print(f"[SelfEdit] restored {os.path.basename(p)} from git, "
-                  f"broken copy kept as {restored}")
-
-        if bad:
-            restored_names = ", ".join(
-                os.path.basename(p) for p, _ in bad)
-            self._announce(
-                f"My code changed but the new version was broken — "
-                f"I restored the last working {restored_names} and "
-                f"restarting.")
-            self._announce(
-                "My code changed — restarting now to load the new version.")
-            self._arm_restart()
-            return "restored_restart_armed"
-
-        self._announce(
-            "My code changed — restarting now to load the new version.")
-        print("[SelfEdit] restart armed.")
-        self._arm_restart()
-        return "restart_armed"
