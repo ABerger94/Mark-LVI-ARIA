@@ -106,6 +106,15 @@ def _snapshot_backup() -> None:
             if slots[i - 1].exists():
                 os.replace(slots[i - 1], slots[i])
         shutil.copyfile(MEMORY_PATH, slots[0])
+        # Off-machine mirror (core/backup_mirror.py): the fresh
+        # rotation, copied to the user's mirror folder if one is
+        # set. Never raises, never fails this snapshot — a dead
+        # mirror costs a copy, not a backup.
+        try:
+            from core import backup_mirror
+            backup_mirror.mirror_backups(slots)
+        except Exception:
+            pass
     except Exception as e:
         print(f"[Memory] ⚠️ Backup failed: {e}")
 

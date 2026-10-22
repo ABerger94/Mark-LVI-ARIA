@@ -82,6 +82,15 @@ def _snapshot_backup() -> None:
             if slots[i - 1].exists():
                 os.replace(slots[i - 1], slots[i])
         shutil.copyfile(CONFIG_FILE, slots[0])
+        # Off-machine mirror (core/backup_mirror.py): the fresh
+        # rotation, copied to the user's mirror folder if one is
+        # set. Never raises, never fails this snapshot — a dead
+        # mirror costs a copy, not a backup.
+        try:
+            from core import backup_mirror
+            backup_mirror.mirror_backups(slots)
+        except Exception:
+            pass
     except Exception as e:
         print(f"[Config] ⚠️ Backup failed: {e}")
 
@@ -462,6 +471,27 @@ def get_watchdog_enabled() -> bool:
 def save_watchdog_enabled(enabled: bool) -> None:
     data = load_api_keys()
     data["watchdog_enabled"] = bool(enabled)
+    write_config(data)
+
+
+# ── Backup mirror ──────────────────────────────────────────────────────
+# Where the rolling backups are ALSO copied (core/backup_mirror.py):
+# a folder on another fate-line than this machine's disk — a Drive
+# or OneDrive synced folder, a NAS mount, a second drive. '' (the
+# default) means no mirror: the rotations live only beside the
+# originals, as they did before the mirror existed. The value is a
+# plain path; nothing validates it at save time, because the folder
+# may be an unmounted drive's — the mirror copy itself reports
+# failure (once, as an incident) when the folder cannot be used.
+
+def get_backup_mirror_dir() -> str:
+    v = load_api_keys().get("backup_mirror_dir", "")
+    return v.strip() if isinstance(v, str) else ""
+
+
+def save_backup_mirror_dir(path: str) -> None:
+    data = load_api_keys()
+    data["backup_mirror_dir"] = (path or "").strip()
     write_config(data)
 
 
