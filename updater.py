@@ -90,6 +90,20 @@ import sys
 import time
 from pathlib import Path
 
+def no_window_kwargs(os_name=None):
+    """Subprocess kwargs that keep a console child INVISIBLE on
+    Windows. This sidecar runs detached — it has no console — so
+    every console child it spawns (git on every poll, python for a
+    smoke import, powershell, taskkill) would get a brand-new
+    console window allocated by Windows: a black box flashing on
+    the desktop for the length of the call, every poll. CREATE_NO_
+    WINDOW suppresses the allocation. Empty dict elsewhere."""
+    if (os_name or os.name) == "nt":
+        return {"creationflags":
+                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 POLL_S = 60.0
 COUNTDOWN_S = 60.0
 HEALTH_GRACE_S = 120.0
@@ -172,7 +186,8 @@ def pid_matches_app(pid, root: Path) -> bool:
                 ["powershell", "-NoProfile", "-Command",
                  f"(Get-CimInstance Win32_Process -Filter "
                  f"\"ProcessId={int(pid)}\").CommandLine"],
-                capture_output=True, text=True, timeout=15)
+                capture_output=True, text=True, timeout=15,
+                **no_window_kwargs())
             cmdline = (r.stdout or "").strip()
             if cmdline:
                 return "main.py" in cmdline
@@ -203,7 +218,8 @@ def terminate_process(pid, root: Path, alive=pid_alive,
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(pid), "/T"],
-                           capture_output=True, timeout=30)
+                           capture_output=True, timeout=30,
+                           **no_window_kwargs())
         else:
             import signal
             os.kill(pid, signal.SIGTERM)
@@ -217,7 +233,8 @@ def terminate_process(pid, root: Path, alive=pid_alive,
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, timeout=30)
+                           capture_output=True, timeout=30,
+                           **no_window_kwargs())
         else:
             import signal
             os.kill(pid, signal.SIGKILL)
@@ -314,7 +331,7 @@ def smoke_import(root: Path, rel_files, runner=subprocess.run):
         try:
             r = runner([sys.executable, "-c", _SMOKE_CODE, mod],
                        cwd=str(root), capture_output=True,
-                       timeout=SMOKE_TIMEOUT_S)
+                       timeout=SMOKE_TIMEOUT_S, **no_window_kwargs())
             if r.returncode != 0:
                 err = r.stderr.decode("utf-8", "replace").strip()
                 lines = err.splitlines()
@@ -407,7 +424,7 @@ class Updater:
             r = subprocess.run(["git", "-C", str(self.root), *args],
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace",
-                               timeout=timeout)
+                               timeout=timeout, **no_window_kwargs())
             return r.returncode, (r.stdout or "").strip(), \
                 (r.stderr or "").strip()
         except Exception as e:

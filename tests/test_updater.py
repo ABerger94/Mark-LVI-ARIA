@@ -474,3 +474,17 @@ def test_update_status_render_reads_the_record():
     # A sidecar that never ran still gets a plain answer.
     text = us.render_status(None, None, None, False)
     assert "OFF" in text and "no record yet" in text
+
+
+# ── Windowless children (2026-10-22): the sidecar runs detached, so
+# every console child it spawns would flash a console window on the
+# desktop — git on EVERY poll. CREATE_NO_WINDOW is the suppression.
+
+def test_no_window_kwargs_windows():
+    assert updater.no_window_kwargs("nt") == {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW",
+                                 0x08000000)}
+
+
+def test_no_window_kwargs_posix():
+    assert updater.no_window_kwargs("posix") == {}

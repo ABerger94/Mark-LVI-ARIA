@@ -48,6 +48,29 @@ def base_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def no_window_kwargs(os_name=None):
+    """CREATE_NO_WINDOW for console children on Windows — mirrored
+    in updater.py (the sidecar imports nothing from the app). A
+    console child spawned by a console-less or GUI parent gets a
+    fresh console window from Windows unless this flag is set."""
+    if (os_name or os.name) == "nt":
+        return {"creationflags":
+                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
+def sidecar_executable(exe=None, os_name=None):
+    """The interpreter the sidecar is spawned with: on Windows, the
+    windowless pythonw.exe beside the app's interpreter when it
+    exists, so the sidecar itself can never own a console window."""
+    exe = exe or sys.executable
+    if (os_name or os.name) == "nt":
+        cand = Path(exe).with_name("pythonw.exe")
+        if cand.is_file():
+            return str(cand)
+    return exe
+
+
 def _write_json_atomic(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -61,7 +84,8 @@ def checkout_head(root: Path) -> str:
     try:
         r = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=15,
+            **no_window_kwargs())
         sha = (r.stdout or "").strip()
         if r.returncode == 0 and sha:
             return sha
@@ -178,7 +202,7 @@ def spawn_updater(root: Path | None = None) -> bool:
                 | subprocess.CREATE_NEW_PROCESS_GROUP)
         else:
             kwargs["start_new_session"] = True
-        subprocess.Popen([sys.executable, str(script)], **kwargs)
+        subprocess.Popen([sidecar_executable(), str(script)], **kwargs)
         return True
     except Exception:
         return False
