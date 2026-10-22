@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import psutil
@@ -432,6 +433,17 @@ class HudCanvas(QWidget):
             self.hud_style = "face"
         self._core_phase = 0.0
 
+        # Waveform-core state (see _paint_wave_core). The canvas has no PCM
+        # history — only the smoothed level — so the wave centrepiece reads
+        # a rolling window of that level, sampled every _step() tick for
+        # EVERY style: switching to the wave never starts from a dead
+        # window. Emission rings are _core_phase stamps of amplitude
+        # peaks, spawned on the tick (never in paint, which must stay a
+        # pure function of state) and expanded/faded by the painter.
+        self._amp_hist: deque = deque(maxlen=288)
+        self._wave_rings: list = []
+        self._wave_prev_amp = 0.0
+
         self._tick       = 0
         self._scale      = 1.0
         self._tgt_scale  = 1.0
@@ -601,6 +613,19 @@ class HudCanvas(QWidget):
         self._live_amp *= 0.86
         self._amp_disp += (self._live_amp - self._amp_disp) * 0.45
         amp = self._amp_disp
+
+        # Waveform-core sampling (see _paint_wave_core): record this tick's
+        # smoothed level into the rolling history the ribbon and spike
+        # rings read, and spawn an emission ring on an upward crossing of
+        # the peak threshold — capped, and expired by phase age. Done here
+        # on the tick so paint stays a pure function of state and a
+        # throttled repaint can never double-spawn a ring.
+        self._amp_hist.append(amp)
+        if self._wave_prev_amp <= 0.72 < amp and len(self._wave_rings) < 6:
+            self._wave_rings.append(self._core_phase)
+        self._wave_prev_amp = amp
+        self._wave_rings = [s for s in self._wave_rings
+                             if self._core_phase - s < 1.6]
 
         # The avatar animates off the very same smoothed level the waveform
         # uses — one audio source, so the mouth can never drift out of sync.
@@ -964,6 +989,256 @@ class HudCanvas(QWidget):
             p.drawText(QRectF(cx - r, cy - fsz, r * 2, fsz * 2),
                        Qt.AlignmentFlag.AlignCenter, name)
 
+    def _paint_wave_core(self, p: QPainter, cx: float, cy: float, r: float,
+                         W: float = 0.0, H: float = 0.0):
+        """Draw the waveform reactor ("Resonance") at (cx, cy), outer
+        radius r — the third centrepiece, approved by Alek 2026-10-22
+        from a rendered prototype (lvi-build/reactor_wave.py).
+
+        Same skeleton as _paint_core — atmosphere gradients, frame marks,
+        crosshair, thin outer circles, sparse graduations, sweeping arcs,
+        the name in its ring — with the voice made the centrepiece instead
+        of a spike ring at the edge:
+
+        * a polar waveform RIBBON: three layered traces (wide dim echo,
+          mid trace, bright voice line) plus a mirrored inner trace,
+          wrapped around the name ring, scrolling and slowly rotating;
+        * DUAL spike rings — outer spikes grow with each history bin's
+          mean level (the low band), inner spikes with the bin's largest
+          step (the high band) — counter-rotating against the ribbon;
+        * EMISSION rings that burst outward when the level peaks
+          (spawned in _step on an upward 0.72 crossing; here they are
+          only expanded and faded);
+        * a comet head riding the fastest sweeping arc.
+
+        DATA, honestly: the canvas has no PCM history, only the smoothed
+        level (_amp_disp). _step therefore samples that level into
+        _amp_hist every tick, and the ribbon is drawn from the LEVEL
+        HISTORY — each point's radius is its history sample's deviation
+        from the window mean, so bursts push the trace out and pauses
+        pull it in. It is a true picture of the level's shape over the
+        last ~5 seconds, not a sample-accurate oscilloscope trace. At
+        silence the history is flat and a phase-driven idle ripple (the
+        same terms _paint_core uses) takes over, so the ring breathes
+        gently and never sits dead or jitters.
+
+        Performance follows _paint_core's discipline: colours pre-mixed
+        onto the background, batched drawLines/drawPolyline, no gradients
+        beyond the two atmosphere radials, ~180 points per trace.
+        """
+        main, acc = self._core_colours()
+        bg = qcol(C.BG)
+        amp = self._amp_disp
+        t = self._core_phase
+        live = (self.speaking or amp > 0.04) and not self.muted
+
+        def blend(col: QColor, a: float) -> QColor:
+            k = max(0.0, min(1.0, a))
+            return QColor(int(bg.red()   + (col.red()   - bg.red())   * k),
+                          int(bg.green() + (col.green() - bg.green()) * k),
+                          int(bg.blue()  + (col.blue()  - bg.blue())  * k))
+
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        # 1. Atmosphere — the same two radial gradients as the reactor.
+        lift = 1.0 + 0.55 * amp + (0.18 if self.speaking else 0.0)
+        p.setPen(Qt.PenStyle.NoPen)
+        for gr, a0, a1 in ((r * 0.70, 0.30, 0.0), (r * 0.34, 0.34, 0.0)):
+            g = QRadialGradient(cx, cy, gr)
+            g.setColorAt(0.00, blend(main, min(0.95, a0 * lift)))
+            g.setColorAt(0.45, blend(main, min(0.95, a0 * lift * 0.52)))
+            g.setColorAt(0.78, blend(main, min(0.95, a0 * lift * 0.18)))
+            g.setColorAt(1.00, blend(main, a1))
+            p.setBrush(QBrush(g))
+            p.drawEllipse(QRectF(cx - gr, cy - gr, gr * 2, gr * 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        # 2. Frame marks at the corners of the whole canvas.
+        if W > 40 and H > 40:
+            m, arm = min(W, H) * 0.035, min(W, H) * 0.055
+            p.setPen(QPen(blend(main, 0.45), 1.4))
+            for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+                x = cx + sx * (W / 2 - m)
+                y = cy + sy * (H / 2 - m)
+                p.drawLine(QLineF(x, y, x - sx * arm, y))
+                p.drawLine(QLineF(x, y, x, y - sy * arm))
+
+        # 3. Crosshair, broken around the core.
+        p.setPen(QPen(blend(main, 0.16), 1))
+        gap = r * 0.62
+        if W > 40:
+            p.drawLine(QLineF(cx - W / 2, cy, cx - gap, cy))
+            p.drawLine(QLineF(cx + gap, cy, cx + W / 2, cy))
+        if H > 40:
+            p.drawLine(QLineF(cx, cy - H / 2, cx, cy - gap))
+            p.drawLine(QLineF(cx, cy + gap, cx, cy + H / 2))
+
+        # 4. Two thin outer circles + sparse graduations, as the reactor's.
+        for rr, a in ((1.00, 0.34), (0.93, 0.16)):
+            rad = r * rr
+            p.setPen(QPen(blend(main, a), 1))
+            p.drawEllipse(QRectF(cx - rad, cy - rad, rad * 2, rad * 2))
+        major, minor = [], []
+        for i in range(72):
+            a = math.radians(i * 5.0)
+            ca, sa = math.cos(a), math.sin(a)
+            if i % 3 == 0:
+                major.append(QLineF(cx + ca * r * 0.885, cy + sa * r * 0.885,
+                                    cx + ca * r * 0.985, cy + sa * r * 0.985))
+            else:
+                minor.append(QLineF(cx + ca * r * 0.945, cy + sa * r * 0.945,
+                                    cx + ca * r * 0.985, cy + sa * r * 0.985))
+        p.setPen(QPen(blend(main, 0.42), 1.3))
+        p.drawLines(major)
+        p.setPen(QPen(blend(main, 0.18), 1))
+        p.drawLines(minor)
+
+        # 5. Sweeping arcs, the reactor's table and state rate — plus a
+        #    comet head at the leading end of the fastest arc.
+        rate = 1.0 + (1.9 if self.state in ("THINKING", "PROCESSING") else 0.0) \
+                   + (1.2 if self.speaking else 0.0)
+        for k, (rr, span, count, dirn, col, a, wid) in enumerate((
+                (0.955, 118, 2, +1, acc,  0.75, 2.0),
+                (0.845, 82,  3, -1, main, 0.38, 1.3),
+                (0.760, 150, 1, +1, acc,  0.45, 1.6),
+                (0.660, 64,  4, -1, main, 0.26, 1.1),
+                (0.545, 128, 2, +1, main, 0.30, 1.2))):
+            rad = r * rr
+            p.setPen(QPen(blend(col, a), wid))
+            box = QRectF(cx - rad, cy - rad, rad * 2, rad * 2)
+            base = (t * rate * (9 + k * 6) * dirn) % 360.0
+            for sgm in range(count):
+                start = base + sgm * (360.0 / count)
+                p.drawArc(box, int(start * 16), int(span * 16))
+                if k == 0 and sgm == 0:
+                    ha = math.radians(-(start + span))
+                    hx = cx + rad * math.cos(ha)
+                    hy = cy + rad * math.sin(ha)
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(blend(acc, 0.95))
+                    p.drawEllipse(QPointF(hx, hy), 3.6, 3.6)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(QPen(blend(col, a), wid))
+
+        # 6. Emission rings from voice peaks (spawned in _step).
+        for stamp in self._wave_rings:
+            age = (t - stamp) / 1.6
+            if 0.0 <= age < 1.0:
+                rad = r * (0.42 + 0.85 * age)
+                p.setPen(QPen(blend(acc, 0.34 * (1.0 - age) ** 1.5), 2.0))
+                p.drawEllipse(QRectF(cx - rad, cy - rad, rad * 2, rad * 2))
+
+        # 7. The waveform ribbon. The history window is sampled by
+        #    fractional position with wraparound interpolation; because
+        #    _step appends every tick, the pattern travels around the
+        #    ring on its own, and a slow phase drift turns the whole
+        #    ribbon against the spike rings below.
+        hist = list(self._amp_hist)
+        nh = len(hist)
+        mean = (sum(hist) / nh) if nh else 0.0
+
+        def _level(frac: float) -> float:
+            if nh == 0:
+                return 0.0
+            pos = (frac % 1.0) * nh
+            i0 = int(pos) % nh
+            i1 = (i0 + 1) % nh
+            fr = pos - int(pos)
+            return hist[i0] * (1.0 - fr) + hist[i1] * fr
+
+        def _idle(frac: float) -> float:
+            return (0.014 * math.sin(t * 1.2 + frac * 6.2832 * 3)
+                    + 0.009 * math.sin(t * 2.3 + frac * 6.2832 * 7 + 1.7))
+
+        gain = 0.24 if live else 0.10
+        idle_w = 0.35 if amp > 0.05 else 1.0
+        base_r = r * 0.46
+        rot = t * 0.25
+        drift = t * 0.02
+        alpha_scale = 0.4 + 0.6 * min(1.0, amp * 2.0)
+        N = 180
+
+        def _off(frac: float) -> float:
+            return (_level(frac + drift) - mean) * gain \
+                + _idle(frac) * idle_w
+
+        for col, a, wid in ((acc, 0.30, 5.0), (main, 0.45, 2.4),
+                            (acc, 0.95, 1.6)):
+            pts = []
+            for i in range(N + 1):
+                frac = i / N
+                ang = frac * 6.2832 + rot
+                rad = base_r + _off(frac) * r
+                pts.append(QPointF(cx + rad * math.cos(ang),
+                                   cy + rad * math.sin(ang)))
+            p.setPen(QPen(blend(col, a * alpha_scale), wid))
+            p.drawPolyline(pts)
+        # Mirrored inner trace — the ribbon's lower edge.
+        pts = []
+        for i in range(N + 1):
+            frac = i / N
+            ang = frac * 6.2832 + rot
+            rad = base_r - abs(_off(frac)) * r * 0.62 - r * 0.012
+            pts.append(QPointF(cx + rad * math.cos(ang),
+                               cy + rad * math.sin(ang)))
+        p.setPen(QPen(blend(main, 0.35), 1.2))
+        p.drawPolyline(pts)
+
+        # 8. Dual spike rings over the same 72-bin split of the history:
+        #    outer from bin MEAN level, inner from bin max STEP, both
+        #    standing on the reactor's idle shimmer so silence still
+        #    moves, counter-rotating against the ribbon.
+        nb = 72
+        ring_off = -rot * 0.6
+        out_lines, in_lines = [], []
+        for i in range(nb):
+            if nh:
+                lo = int(i * nh / nb)
+                hi = max(lo + 1, int((i + 1) * nh / nb))
+                seg = hist[lo:min(hi, nh)] or [0.0]
+                e_out = sum(seg) / len(seg)
+                dmax, prev = 0.0, seg[0]
+                for v in seg[1:]:
+                    dmax = max(dmax, abs(v - prev))
+                    prev = v
+                e_in = min(1.0, dmax * 5.0)
+            else:
+                e_out = e_in = 0.0
+            idle = 0.018 + 0.012 * math.sin(t * 1.2 + i * 0.7)
+            a = math.radians(i * (360.0 / nb)) + ring_off
+            ca, sa = math.cos(a), math.sin(a)
+            h_out = r * (idle + 0.30 * e_out)
+            r0 = base_r + r * 0.085
+            out_lines.append(QLineF(cx + ca * r0, cy + sa * r0,
+                                    cx + ca * (r0 + h_out),
+                                    cy + sa * (r0 + h_out)))
+            h_in = r * (idle * 0.7 + 0.21 * e_in)
+            r1 = base_r - r * 0.085
+            in_lines.append(QLineF(cx + ca * r1, cy + sa * r1,
+                                   cx + ca * (r1 - h_in),
+                                   cy + sa * (r1 - h_in)))
+        p.setPen(QPen(blend(acc if live else main, 0.25 + 0.5 * amp), 1.7))
+        p.drawLines(out_lines)
+        p.setPen(QPen(blend(main, 0.5), 1.4))
+        p.drawLines(in_lines)
+
+        # 9. The inner ring the name sits in, and the name — sized exactly
+        #    as the reactor sizes it.
+        inner = r * 0.355
+        p.setPen(QPen(blend(acc, 0.30 + 0.45 * amp), 1.5))
+        p.drawEllipse(QRectF(cx - inner, cy - inner, inner * 2, inner * 2))
+        name = self._assistant_name or ""
+        if name:
+            space = max(1.0, r * 0.018)
+            fsz = max(8, int(min(r * 0.105,
+                                 (inner * 1.75) / max(1, len(name)) * 1.6 - space)))
+            f = QFont("Courier New", fsz, QFont.Weight.Bold)
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, space)
+            p.setFont(f)
+            p.setPen(QPen(blend(qcol(C.WHITE), 0.6 + 0.4 * min(1.0, amp * 2)), 1))
+            p.drawText(QRectF(cx - r, cy - fsz, r * 2, fsz * 2),
+                       Qt.AlignmentFlag.AlignCenter, name)
+
     def paintEvent(self, _):
         p = QPainter(self)
         if not p.isActive():      # device not ready (e.g. 0-size during layout) — skip cleanly
@@ -1016,10 +1291,20 @@ class HudCanvas(QWidget):
                     _acc = qcol(C.PRI)
             self._avatar.paint(p, cx, _head_cy, _r_head, _main, _acc, qcol(C.BG))
 
-        # reactor core — the other centrepiece, and the fallback if the head
-        # could not be built. There is no third path: the old face.png branch
-        # was unreachable (no such file ships) and the bare orb it fell through
-        # to is what this replaces.
+        # waveform core — the third centrepiece: the reactor's skeleton
+        # with the voice itself as the picture (see _paint_wave_core).
+        # Same band geometry as the reactor, so switching styles never
+        # moves the status line or the strip below.
+        elif self.hud_style == "wave":
+            _band_t = 12.0
+            _band_h = max(60.0, _sy_status - 12.0 - _band_t)
+            _r = min(W * 0.46, _band_h / 2.0)
+            self._paint_wave_core(p, cx, _band_t + _band_h / 2.0, _r, W, _band_h)
+
+        # reactor core — the second centrepiece, and the fallback if the
+        # head could not be built. The old face.png branch was unreachable
+        # (no such file ships) and the bare orb it fell through to is what
+        # this replaces.
         else:
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
@@ -7061,29 +7346,40 @@ class MainWindow(QMainWindow):
 
     def _refresh_hud_btn(self):
         from memory.config_manager import get_hud_style
-        face = get_hud_style() == "face"
-        # Neither state is "off", so both read as active — this is a choice
-        # between two things, not a switch with a disabled side.
+        cur = get_hud_style()
+        # No state is "off", so all three read as active — this is a choice
+        # between centrepieces, not a switch with a disabled side. Each
+        # tooltip names the NEXT style, because the button cycles.
         style = f"""
             QPushButton {{ background: {C.PANEL2}; color: {C.PRI};
                 border: 1px solid {C.BORDER_A}; border-radius: 3px;
                 text-align: left; padding: 0 8px; }}
             QPushButton:hover {{ color: {C.WHITE}; border: 1px solid {C.BORDER_B}; }}"""
-        self._hud_btn.setText("🧑  HUD: ANIMATED FACE" if face
-                              else "◉  HUD: REACTOR CORE")
+        labels = {
+            "face": ("🧑  HUD: ANIMATED FACE",
+                     "An animated head that speaks your words and shows what "
+                     "JARVIS is doing. Tap to switch to the reactor core."),
+            "core": ("◉  HUD: REACTOR CORE",
+                     "A reactor core that turns with the state and moves with "
+                     "your voice. Tap to switch to the waveform core."),
+            "wave": ("∿  HUD: WAVEFORM CORE",
+                     "The reactor drawn as her voice — a living waveform "
+                     "ribbon that moves with the sound. Tap to switch to "
+                     "the animated head."),
+        }
+        text, tip = labels.get(cur, labels["face"])
+        self._hud_btn.setText(text)
         self._hud_btn.setStyleSheet(style)
-        self._hud_btn.setToolTip(
-            "An animated head that speaks your words and shows what JARVIS is "
-            "doing. Tap to switch to the reactor core."
-            if face else
-            "A reactor core that turns with the state and moves with your voice. "
-            "Tap to switch to the animated head.")
+        self._hud_btn.setToolTip(tip)
 
     def _toggle_hud_style(self):
-        """Swap the centrepiece. Both objects stay in memory, so the change is
-        instant and switching back costs nothing."""
-        from memory.config_manager import get_hud_style, save_hud_style
-        want = "core" if get_hud_style() == "face" else "face"
+        """Cycle the centrepiece: face → core → wave → face. All three stay
+        in memory, so the change is instant and switching costs nothing."""
+        from memory.config_manager import (HUD_STYLES, get_hud_style,
+                                           save_hud_style)
+        cur = get_hud_style()
+        want = HUD_STYLES[(HUD_STYLES.index(cur) + 1) % len(HUD_STYLES)] \
+            if cur in HUD_STYLES else "face"
         save_hud_style(want)
         try:
             self.hud.hud_style = want
@@ -7091,9 +7387,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._refresh_hud_btn()
-        self._log.append_log(
-            "SYS: HUD switched to the animated face." if want == "face"
-            else "SYS: HUD switched to the reactor core.")
+        self._log.append_log({
+            "face": "SYS: HUD switched to the animated face.",
+            "core": "SYS: HUD switched to the reactor core.",
+            "wave": "SYS: HUD switched to the waveform core.",
+        }[want])
 
     def _toggle_ptt(self):
         from memory.config_manager import (get_push_to_talk_enabled,
