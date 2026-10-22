@@ -23,7 +23,7 @@ def _configure_pyautogui(module) -> None:
 pyautogui = LazyModule("pyautogui", _configure_pyautogui)
 pyperclip = LazyModule("pyperclip")
 
-from core import confirm, outcome
+from core import confirm, outcome, power_intent
 from core.undo import push_undo
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
@@ -885,6 +885,25 @@ def computer_settings(
                 "there is already a confirmation waiting on screen - the user "
                 "has to answer that one first",
                 wanted=action)
+        # A direct user command is required on top of the confirmation.
+        # The confirmation asks "may this happen?"; the power-intent arm
+        # (core/power_intent.py, armed only by the user's own typed,
+        # spoken or phone-sent words) proves he actually asked for it.
+        # Without an arm, this call is the model pattern-matching on the
+        # word "restart" — which is exactly what happened after every
+        # code-watcher restart announcement — so the answer is a flat
+        # refusal: no banner on screen, no subprocess. The arm is spent
+        # by this attempt even if the user then cancels the confirmation;
+        # a fresh command is what re-arms it. toggle_wifi is exempt: it
+        # is gated by the confirmation alone, as before.
+        if action in ("restart", "shutdown"):
+            if not power_intent.consume(action):
+                refusal = ("I only restart the computer when you ask me "
+                           "to directly." if action == "restart" else
+                           "I only shut down the computer when you ask "
+                           "me to directly.")
+                return outcome.failed("computer_settings", refusal,
+                                      wanted=action)
         return confirm.request(
             key=action, title=title, detail=detail,
             run=lambda f=func, a=action: (f(), f"{a} done.")[1],

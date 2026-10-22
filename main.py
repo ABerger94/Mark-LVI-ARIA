@@ -66,6 +66,7 @@ from memory.memory_manager import (
 # (screen_process, close_camera, save_memory, manage_monitor, shutdown_jarvis,
 # system_status).
 from core import outcome
+from core import power_intent
 from core.action_loader import strip_meta
 from core.playback import PlaybackWriter, cursor_horizon
 from actions.screen_processor  import _capture_camera, _capture_screen
@@ -1244,6 +1245,9 @@ class JarvisLive:
         if self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
+        # The user's own typed words — one of the only seams allowed to
+        # arm a computer power action (core/power_intent.py).
+        power_intent.note_user_text(text)
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -2209,6 +2213,12 @@ class JarvisLive:
 
                             full_in = " ".join(in_buf).strip()
                             if full_in:
+                                # The user's spoken words for this turn
+                                # (input_transcription of their mic audio —
+                                # nothing else writes in_buf). A direct
+                                # power command arms its action here;
+                                # ARIA's own output can never reach this.
+                                power_intent.note_user_text(full_in)
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
@@ -2786,6 +2796,10 @@ class JarvisLive:
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:
                         self.wake(reason="remote command")
+                    # Text typed on the owner's paired phone is the
+                    # user's own words — the third seam allowed to arm
+                    # a computer power action (core/power_intent.py).
+                    power_intent.note_user_text(text)
                     await self.session.send_client_content(
                         turns={"role": "user", "parts": [{"text": text}]},
                         turn_complete=True,
