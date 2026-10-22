@@ -5869,6 +5869,60 @@ class MainWindow(QMainWindow):
         # display-only). Everything else lands here as a last resort.
         return home / "Desktop"
 
+    @staticmethod
+    def _resolve_python312(runner=None, version_info=None,
+                           executable=None):
+        """
+        Locate the Python 3.12 interpreter for the desktop shortcut.
+
+        The shortcut must start ARIA on 3.12 \u2014 the interpreter her
+        dependencies are installed for \u2014 no matter which Python
+        the current process happens to run. (Launched under the
+        system-default 3.14, parts of her silently go missing: the
+        push library lived in 3.12's house only.) Resolution order:
+        the `py` launcher, the PEP 514 registry, then the current
+        interpreter when it already IS 3.12. Returns None when no
+        3.12 can be found \u2014 the caller falls back and says so.
+        """
+        runner = runner or subprocess.run
+        version_info = version_info or sys.version_info
+        executable = executable or sys.executable
+        # 1. The py launcher names the exact 3.12 executable.
+        try:
+            r = runner(["py", "-3.12", "-c",
+                        "import sys; print(sys.executable)"],
+                       capture_output=True, text=True, timeout=10,
+                       creationflags=getattr(subprocess,
+                                             "CREATE_NO_WINDOW", 0))
+            out = (r.stdout or "").strip()
+            if r.returncode == 0 and out and Path(out).is_file():
+                return Path(out)
+        except Exception:
+            pass
+        # 2. PEP 514: python.org installs register under PythonCore.
+        try:
+            import winreg
+            for hive in (winreg.HKEY_CURRENT_USER,
+                         winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(
+                            hive,
+                            r"Software\Python\PythonCore\3.12"
+                            r"\InstallPath") as key:
+                        exe, _ = winreg.QueryValueEx(key,
+                                                     "ExecutablePath")
+                        if exe and Path(exe).is_file():
+                            return Path(exe)
+                except OSError:
+                    continue
+        except Exception:
+            pass
+        # 3. Already running under 3.12 \u2014 this IS the right Python.
+        if tuple(version_info[:2]) == (3, 12):
+            return Path(executable)
+        return None
+
+
     def _create_desktop_shortcut(self):
         """
         Create a desktop shortcut on Windows / macOS / Linux.
@@ -5886,11 +5940,16 @@ class MainWindow(QMainWindow):
 
         try:
             _os = platform.system()
+            detail  = ""
 
             # ── Windows ───────────────────────────────────────────────────────
             if _os == "Windows":
-                pythonw  = python.parent / "pythonw.exe"
-                target   = str(pythonw if pythonw.exists() else python)
+                py312    = self._resolve_python312()
+                base     = py312 if py312 else python
+                pythonw  = base.parent / "pythonw.exe"
+                target   = str(pythonw if pythonw.exists() else base)
+                detail   = (f"Python 3.12 \u2014 {target}" if py312 else
+                            f"Python 3.12 not found \u2014 used {target}")
                 lnk      = str(desktop / "A.R.I.A.lnk")
                 icon_loc = str(ico_path) if ico_path.exists() else f"{target},0"
                 self._create_lnk_windows(lnk, target, str(script),
@@ -5975,7 +6034,8 @@ class MainWindow(QMainWindow):
                 )
                 desk.chmod(desk.stat().st_mode | 0o755)
 
-            self._log.append_log("SYS: Desktop shortcut created.")
+            self._log.append_log("SYS: Desktop shortcut created."
+                                 + (f" ({detail})" if detail else ""))
         except Exception as e:
             self._log.append_log(f"ERR: Shortcut failed — {e}")
 
