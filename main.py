@@ -75,6 +75,7 @@ from actions                   import morning_briefing as _briefing
 from memory.config_manager     import (
     get_brief_enabled, get_media_resolution, get_proactive_audio_enabled,
     get_push_to_talk_enabled, get_thinking_enabled, get_turn_tuning, get_voice,
+    get_watchdog_enabled,
     get_wake_word_enabled, save_wake_word_enabled,    get_input_device, get_output_device,
 )
 from core                     import gemini as _gemini
@@ -84,6 +85,7 @@ from core                      import confirm as confirm_gate
 from core                      import routines as routines_core
 from core                      import scheduler as scheduler_core
 from core                      import diagnostics as diagnostics_core
+from core                      import watchdog as watchdog_core
 from core.selfedit             import SelfEditWatcher
 from types                     import SimpleNamespace
 from core                      import audio_devices
@@ -1319,6 +1321,43 @@ class JarvisLive:
 
         if self._loop:
             asyncio.run_coroutine_threadsafe(_do_restart(), self._loop)
+
+    # ── main-process watchdog (core/watchdog.py) ─────────────────────
+
+    async def _run_watchdog_heartbeat(self) -> None:
+        """Beat the "loop" heartbeat every 2 seconds, for the life of
+        the process. Created once in run(), OUTSIDE the session
+        TaskGroup: the beat must survive session rebuilds and
+        reconnect backoffs, because those are exactly the moments a
+        false wedge verdict would be most damaging. If this
+        coroutine cannot run, the loop is wedged — which is the
+        verdict the watchdog exists to reach."""
+        while True:
+            watchdog_core.beat("loop")
+            await asyncio.sleep(2)
+
+    def _restart_for_watchdog(self):
+        """Relaunch after a wedged loop, called from the watchdog's
+        supervisor thread. The self-edit restart's shape — spawn the
+        replacement first, then exit — but deliberately NOT routed
+        through the event loop and with no session summary: the loop
+        is the thing that is wedged, so anything scheduled onto it
+        would queue forever, and a summary it cannot produce is not
+        worth a corpse. The watchdog's incident record, written
+        before this is called, is the evidence instead."""
+        import os as _os
+        import subprocess as _sp
+        script = _os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+        if not script or not _os.path.isfile(script):
+            print("[Watchdog] restart requested — no script to relaunch")
+            return
+        print("[Watchdog] relaunching — a loop wedged past the threshold…")
+        try:
+            _sp.Popen([sys.executable, script] + sys.argv[1:])
+        except Exception as e:
+            print(f"[Watchdog] relaunch failed: {e}")
+            return
+        _os._exit(0)
 
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
@@ -2870,6 +2909,23 @@ class JarvisLive:
         scheduler_core.bind(say=self._scheduler_say,
                             run_prompt=self._scheduler_run,
                             briefing=self._scheduler_briefing)
+
+        # Main-process watchdog (core/watchdog.py): supervises the
+        # asyncio loop (heartbeat coroutine below) and the Qt loop
+        # (the window's clock tick beats from ui.py). A loop silent
+        # past the threshold is restarted through
+        # _restart_for_watchdog, at most three times an hour — the
+        # incident record is the evidence. Off only by explicit
+        # config ("watchdog_enabled": false), for a human who wants
+        # to watch a stall happen instead of being restarted out of
+        # it. Arming is guarded like every startup service here: a
+        # watchdog that cannot start must never cost the assistant.
+        try:
+            if get_watchdog_enabled():
+                watchdog_core.arm(restart=self._restart_for_watchdog)
+                asyncio.create_task(self._run_watchdog_heartbeat())
+        except Exception as e:
+            print(f"[Watchdog] ⚠️ not armed: {e}")
 
         # Content panel tabs (UI TABS): the Inbox and Calendar tabs
         # pull from the same Gmail / iCal sources the tools speak

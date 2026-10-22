@@ -446,6 +446,25 @@ def save_proactive_alerts(enabled: bool) -> None:
     write_config(data)
 
 
+
+# ── Main-process watchdog ──────────────────────────────────────────────
+# Whether the watchdog supervises the two loops (core/watchdog.py):
+# a loop silent past the stale threshold is restarted, at most three
+# times an hour, with an incident as the record. On unless explicitly
+# switched off (the engine_auto_failover idiom) — the flag exists so
+# a human debugging a stall can watch it happen without being
+# restarted out from under the evidence.
+
+def get_watchdog_enabled() -> bool:
+    return bool(load_api_keys().get("watchdog_enabled", True))
+
+
+def save_watchdog_enabled(enabled: bool) -> None:
+    data = load_api_keys()
+    data["watchdog_enabled"] = bool(enabled)
+    write_config(data)
+
+
 # ── Audio devices ────────────────────────────────────────────────────────────
 # Stored as device NAMES, not sounddevice indices. Indices shift every time a
 # USB device is plugged in or removed, so a saved index silently starts pointing

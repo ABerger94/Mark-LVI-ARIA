@@ -5755,6 +5755,16 @@ class MainWindow(QMainWindow):
 
     def _tick_clock(self):
         self._clock_lbl.setText(time.strftime("%H:%M:%S"))
+        # Watchdog heartbeat (core/watchdog.py): this handler only
+        # runs while Qt's event loop is turning, so beating here
+        # proves the UI thread is alive. A wedged UI thread — the
+        # COM-freeze signature — stops the beat and the watchdog
+        # notices. Guarded: a heartbeat must never break the clock.
+        try:
+            from core import watchdog as _watchdog
+            _watchdog.beat("ui")
+        except Exception:
+            pass
         self._date_lbl.setText(time.strftime("%a %d %b %Y"))
 
     def _build_left_panel(self) -> QWidget:
