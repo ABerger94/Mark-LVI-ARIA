@@ -62,14 +62,38 @@ The same atomic-write + backup + recovery treatment covers
 tool exceptions, memory/config recoveries and broken self-edits are appended
 to `memory/incidents.jsonl` — a ledger she (and you) can actually audit.
 
+**Watchdog.** The old ARIA's signature death was a wedged main thread that
+nothing inside the process could see. Here, the session loop and the UI
+clock heartbeat into `core/watchdog.py`; a supervisor thread that neither
+of them can block watches the stamps, and 30 seconds of silence from both
+means wedged: it records a `watchdog_restart` incident (also kept in
+`memory/watchdog.json`), then restarts her through the same relaunch path
+self-edit uses. Three restarts in an hour is the cap — past that she stays
+down and the incident is the evidence, rather than loop-restarting forever.
+It detects and restarts; it does not move anything out of process.
+
+**Self-heal.** Diagnostics (`run_diagnostics`, or the 🩺 button) only ever
+*reports*. The separate `self_heal` tool acts, on exactly the classes that
+have a designed remedy: a corrupt config or memory file is restored through
+the loaders' own witnessed recovery and verified by re-reading it; rejected
+action/plugin files are named and left exactly where they lie. Anything
+else is reported, not touched, and every heal lands in the incident ledger.
+
+**Backup mirror.** The rolling backups above live beside the files they
+protect. Set `backup_mirror_dir` (say "set the backup mirror to …", or use
+`set_backup_mirror`) to a folder your cloud drive syncs — OneDrive,
+Google Drive — and every memory and config snapshot is copied there too,
+verified by size. A mirror that fails costs one incident, never the backup.
+
 ---
 
 ## Capabilities
 
-**72 tools** on a desktop install — 9 built in, 62 actions, plus
+**84 tools** on a desktop install — 9 built in, 74 actions, plus
 `youtube_video`, which only loads when a display is present. (A headless
-registry walk counts 71.) The in-app **⌘ COMMANDS** overlay is the source of
-truth: it is rebuilt from the live registries every time it opens, so it
+registry walk counts 83.) Tools from connected MCP servers join on top of
+that, namespaced per server. The in-app **⌘ COMMANDS** overlay is the source
+of truth: it is rebuilt from the live registries every time it opens, so it
 cannot list a tool she doesn't have. The shape of the suite:
 
 | Area | What's there |
@@ -79,10 +103,12 @@ cannot list a tool she doesn't have. The shape of the suite:
 | Spotify & DJ | `spotify` (now playing from the real window title, transport, per-app volume), `dj` (saved playlist → mood → labelled search, in that order — never an invented playlist), `save_playlist` (any Spotify link form, normalised and verified) |
 | Routines | `routine_record_start/stop`, `run_routine` (with `{{param}}` substitution), `list_routines`, `describe_routine`, `delete_routine`, `trust_routine`, `untrust_routine`, `export_routine_pack`, `import_routine_pack` |
 | Scheduling | in-app scheduler: `set_timer`, `set_recurring_task`, `list_scheduled_tasks`, `cancel_scheduled_task`, `break_reminders` — plus `reminder`, which writes OS-level reminders |
-| Connections | `gmail_setup`, `read_email`, `triage_email`, `send_email`; `calendar_setup`, `check_calendar` (read-only iCal feed); `github_setup`, `github_create_repo`, `github_push_file`; `provider_setup` |
+| Connections | `gmail_setup`, `read_email`, `triage_email`, `send_email`; `calendar_setup`, `check_calendar` (read-only iCal feed; recurring events expand — RRULE, EXDATE and RDATE honoured); `github_setup`, `github_create_repo`, `github_push_file`; `provider_setup` |
+| Delegation | `delegate_task` (a prompt worked in the background by her own engine, up to 4 in flight), `task_status`, `task_cancel` — records in `memory/delegated_tasks.json`, completion announced through the scheduler |
+| MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` |
 | Watches | price watches (`watch_price`, `check_price_watches`, `list_price_watches`, `unwatch_price` — checks ride the scheduler), screen watches (`watch_screen`, `unwatch_screen`, `list_screen_watches`), news topic monitors (`manage_monitor`) |
 | Notes & cards | `take_note`, `read_notes`, `journal_write`; `mtg_card`, `mtg_advice` (Scryfall, keyless) |
-| Herself | `save_memory`, `recall_memory`, `forget_memory`, `edit_own_code`, `patch_own_code`, `morning_briefing`, `send_message`, `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
+| Herself | `save_memory`, `recall_memory`, `forget_memory`, `edit_own_code`, `patch_own_code`, `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
 
 **Startup briefing.** On launch she greets you with a briefing composed in
 code — calendar, triaged inbox, weather, headlines from your monitored
@@ -163,6 +189,15 @@ one-click installs from inside the app — they are deliberately not in
 | "Set up my calendar" | `ical_url` | your secret iCal URL; read-only by design |
 | "Set up GitHub" | `github_token`, `github_username` | storing the token does **not** enable writes — say "arm GitHub" (`github_armed`) as a separate, deliberate step |
 | "Wire my Groq key" (also OpenRouter / Mistral / Ollama Cloud) | provider creds | for the providers pipeline; Gemini needs nothing here |
+| "Set up an MCP server" then "connect the MCP server" | `mcp_servers` | both steps are confirmation-gated — a server is a program she runs; its tools appear in ⌘ COMMANDS once connected, namespaced `mcp_<server>_<tool>` |
+| "Set the backup mirror to <folder>" | `backup_mirror_dir` | point it at a OneDrive/Google Drive folder for off-machine backup copies |
+
+Two requirements deserve a footnote: the **MCP client** (`mcp` in
+`requirements.txt`) is imported lazily — remove the package and every MCP
+tool answers "MCP support is not installed" while the rest of her works
+untouched. **Calendar recurrence** uses `python-dateutil`, also in
+requirements; without it, recurring events show their first occurrence
+only.
 
 **Coming from the old ARIA?** Her memory imports:
 
@@ -182,8 +217,17 @@ Idempotent; her DJ playlists land in the store's `playlist` category, where
   and the gate fails closed). Gated today: PC restart, shutdown and Wi-Fi
   toggle; sending a message; sending email; deleting a file; a real
   file-organize run; deleting a routine; game installs (and update-with-
-  shutdown); dev-agent builds. A scheduled game update with nobody at the
-  screen is the one deliberate exception — gating it would kill it silently.
+  shutdown); dev-agent builds; creating/changing an MCP server's spec,
+  launching one, and removing one. A scheduled game update with nobody at
+  the screen is the one deliberate exception — gating it would kill it
+  silently.
+- **Delegation inherits the gates.** A delegated task runs the same tools
+  through the same dispatch; if one of its calls hits a confirmation gate,
+  the task parks as *blocked* with the action named — it never bypasses,
+  and delegation itself never counts as routine trust.
+- **The watchdog is capped.** At most 3 watchdog restarts per hour; past
+  that it leaves her down with the incident recorded, rather than
+  restart-looping a machine nobody is watching.
 - **GitHub is disarmed by default.** The token alone changes nothing; arming
   is separate.
 - **Routines earn trust.** An untrusted routine's gated steps park for your
@@ -209,20 +253,33 @@ Idempotent; her DJ playlists land in the store's `playlist` category, where
 
 - **The wake word is still "Hey Jarvis."** No "Hey ARIA" model has been
   trained yet; until one is, wake-word use is opt-in under the old name.
-- **Recurring calendar events surface once**, at their start — the iCal
-  reader does not expand RRULEs. (Inherited from the old ARIA, pinned by a
-  test so it can't drift silently.)
+- **Recurring calendar events expand**, with edges: FREQ (daily, weekly,
+  monthly, yearly), INTERVAL, COUNT and UNTIL are honoured, EXDATE removes
+  and RDATE adds occurrences, and generation is capped per event per
+  query. A malformed rule degrades to the first occurrence for that event
+  rather than failing the calendar.
 - **Windows audio COM runs in this process** — pycaw volume and the SAPI
   fallback voice are in-process, the design that crashed the old ARIA four
-  times. A process-isolation cure is specced and deliberately shelved; if
-  the crash class bites here, that's the known fix.
+  times. The watchdog (above) now catches that wedge and restarts her,
+  incident recorded; a process-isolation cure is specced and deliberately
+  shelved — if restarts become routine, that's the known fix.
+- **Delegated tasks are weaker on provider rungs.** Delegation runs on
+  the one-shot Gemini chain; if that chain falls through to an
+  OpenAI-compatible provider rung, the rung receives no tool declarations,
+  so the task answers from its prompt alone and says nothing about it.
+- **MCP servers are trusted code.** Connecting one runs its command on
+  this machine with her permissions — the setup/connect gates are the
+  consent point. Server processes are children: disconnecting, or a
+  normal quit, shuts them down cleanly; the app's hard-exit restart paths
+  (self-edit, watchdog) can orphan one until it notices its parent gone.
 - **Keys are plaintext at rest.** `config/api_keys.json` holds every
   credential unencrypted (DPAPI encryption is designed, not built). It is
   git-ignored — the pattern is verified to match — but anyone with your
   Windows account can read the file.
-- **Backups live beside the store.** Memory, its backups, embeddings and
-  the incident ledger are all under `memory/`; there is no off-machine
-  copy.
+- **Backups live beside the store by default.** Memory, its backups,
+  embeddings and the incident ledger are all under `memory/`. Setting a
+  backup mirror (above) is what creates the off-machine copy — until
+  then, one dead disk still takes the originals and the backups together.
 - **The dashboard is LAN-only** with a self-signed certificate — expect a
   one-time browser warning per device.
 
@@ -242,7 +299,8 @@ py -3.12 -m pytest tests\test_commands.py -q
 
 Layout, briefly: `main.py` (session, dispatch, startup briefing),
 `ui.py` (the HUD), `core/` (prompt, gemini ladders, confirm, outcome,
-commands, scheduler, routines, self-edit, gmail/ical/github/spotify cores),
+commands, scheduler, routines, self-edit, watchdog, self-heal, backup
+mirror, delegation, MCP client, gmail/ical/github/spotify cores),
 `actions/` (one file per tool, self-describing), `providers/` (the opt-in
 pipeline), `memory/` (store, config, embeddings), `dashboard/` (phone UI),
 `tools/` (the ARIA memory importer).
