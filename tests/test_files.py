@@ -327,3 +327,89 @@ def test_read_on_a_directory_points_at_list_and_tree(tmp_path):
     out = fc.read_file(str(tmp_path))
     assert "Not a file" in out
     assert "'list'" in out and "'tree'" in out
+
+
+# ── read_file: whole files, then honest paging (2026-10-22) ─────────────────
+#
+# The live failure these pin: asked to REVIEW a file, she got its first
+# 4,000 characters, a "[Truncated]" note and no way onward — and answered
+# that she needed to continue. read_file now returns the whole file in
+# one call up to a 200,000-char ceiling, and past the ceiling it pages by
+# character offset, each partial return naming the exact next call.
+
+def test_read_returns_whole_file_under_the_ceiling(tmp_path):
+    body = "a line of text\n" * 1000          # 15,000 chars — past the old cap
+    (tmp_path / "big.txt").write_text(body, encoding="utf-8")
+    out = fc.read_file(str(tmp_path), name="big.txt")
+    assert out == body
+    assert "Truncated" not in out and "Partial read" not in out
+
+
+def test_read_just_over_the_ceiling_pages_to_eof(tmp_path):
+    body = "a" * (fc._READ_CEILING + 50)
+    (tmp_path / "huge.txt").write_text(body, encoding="utf-8")
+    first = fc.read_file(str(tmp_path), name="huge.txt")
+    assert first.startswith(body[:fc._READ_CEILING])
+    assert f"of {len(body)} total" in first
+    assert f"offset={fc._READ_CEILING} to continue" in first
+    rest = fc.read_file(str(tmp_path), name="huge.txt",
+                        offset=fc._READ_CEILING)
+    assert rest == "a" * 50 + f"\n\n[End of file — {len(body)} total chars.]"
+
+
+def test_read_mid_file_offset_returns_the_right_slice(tmp_path):
+    body = "".join(str(i % 10) for i in range(1000))
+    (tmp_path / "digits.txt").write_text(body, encoding="utf-8")
+    out = fc.read_file(str(tmp_path), name="digits.txt",
+                       offset=100, limit=50)
+    assert out.startswith(body[100:150])
+    assert "chars 100–150 of 1000 total" in out
+    assert "offset=150 to continue" in out
+    tail = fc.read_file(str(tmp_path), name="digits.txt",
+                        offset=950, limit=100)
+    assert tail == body[950:] + "\n\n[End of file — 1000 total chars.]"
+
+
+def test_read_dispatcher_pages_via_parameters(tmp_path):
+    body = "x" * 300
+    (tmp_path / "d.txt").write_text(body, encoding="utf-8")
+    out = fc.file_controller({"action": "read", "path": str(tmp_path),
+                              "name": "d.txt", "offset": 250, "limit": 25})
+    assert out.startswith(body[250:275])
+    assert "offset=275 to continue" in out
+
+
+def test_read_binary_file_is_refused_not_dumped(tmp_path):
+    blob = b"\x89PNG\r\n\x1a\n" + b"\x00\xff\xfe" * 40
+    (tmp_path / "blob.bin").write_bytes(blob)
+    out = fc.read_file(str(tmp_path), name="blob.bin")
+    assert "Not text" in out and "binary" in out
+
+
+def _watched_tree(tmp_path, monkeypatch):
+    """A fake source tree core/selfedit treats as her repo root."""
+    from core import selfedit
+    tree = tmp_path / "repo"
+    (tree / "core").mkdir(parents=True)
+    target = tree / "core" / "mod.py"
+    monkeypatch.setattr(selfedit, "_base_dir", lambda: tree)
+    return selfedit, tree, target
+
+
+def test_full_read_of_a_watched_file_notes_full_coverage(tmp_path,
+                                                         monkeypatch):
+    selfedit, _tree, target = _watched_tree(tmp_path, monkeypatch)
+    target.write_text("A = 1\nB = 2\nC = 3\n", encoding="utf-8")
+    out = fc.read_file(str(target))
+    assert out == "A = 1\nB = 2\nC = 3\n"
+    assert selfedit._unread_lines(os.path.realpath(target)) == (3, 0)
+
+
+def test_paged_read_of_a_watched_file_notes_only_the_window(tmp_path,
+                                                            monkeypatch):
+    selfedit, _tree, target = _watched_tree(tmp_path, monkeypatch)
+    target.write_text("AAAA\nBBBB\nCCCC\n", encoding="utf-8")
+    fc.read_file(str(target), limit=5)              # line 1 only
+    assert selfedit._unread_lines(os.path.realpath(target)) == (3, 2)
+    fc.read_file(str(target), offset=5)             # lines 2–3
+    assert selfedit._unread_lines(os.path.realpath(target)) == (3, 0)
