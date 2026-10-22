@@ -110,6 +110,18 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 # occurrence, ARIA's original behaviour.
 python-dateutil>=2.8,<3
 
+# ── Web Push for phone notifications (core/notify.py) ──────────────────────
+# pywebpush sends the push; py-vapid (its dependency) signs it. The whole
+# closure installs as wheels EXCEPT http-ece, which is sdist-only at every
+# version — verified by hand (2026-10-22) to be pure Python: .py sources and
+# a plain setuptools setup.py, no C, no compiler. That one pure-Python
+# sdist is an approved exception to the wheels-only rule Alek set after
+# the laptop install failures; anything else needing a compiler is not.
+# core/notify.py imports pywebpush lazily — delete this line and the app
+# runs exactly as before, with notifications falling back to the live
+# dashboard toast and the missed queue.
+pywebpush>=2,<3
+
 # ── MCP client (core/mcp_client.py) ────────────────────────────────────────
 # The Model Context Protocol SDK: tools from servers the user configures
 # (stdio commands or HTTP URLs) join her tool list, namespaced per server.

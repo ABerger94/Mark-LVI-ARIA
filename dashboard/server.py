@@ -26,7 +26,7 @@ from pathlib import Path
 _DEPS_OK = False
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
     import uvicorn
     _DEPS_OK = True
 except ImportError:
@@ -627,6 +627,46 @@ def _read(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 
+# ── PWA icons ──────────────────────────────────────────────────────────────
+# The manifest needs 192px and 512px PNGs. They are drawn here,
+# pixel by pixel (the page palette: near-black field, indigo ring,
+# green core) and encoded with zlib/struct alone — Pillow would do
+# it in fewer lines, but the dashboard deliberately runs on the
+# smallest dependency set that can, and a one-time 512×512 pixel
+# loop is a tenth of a second. Drawn once, cached for the process.
+_ICON_CACHE: dict = {}
+
+
+def _icon_png(size: int) -> bytes:
+    if size in _ICON_CACHE:
+        return _ICON_CACHE[size]
+    import struct, zlib
+
+    bg, ring, dot = (7, 9, 15), (99, 102, 241), (34, 197, 94)
+    c = (size - 1) / 2.0
+    r_out, r_in, r_dot = size * 0.36, size * 0.27, size * 0.09
+    rows = []
+    for y in range(size):
+        row = bytearray(b"\x00")
+        for x in range(size):
+            d = ((x - c) ** 2 + (y - c) ** 2) ** 0.5
+            px = dot if d <= r_dot else ring if r_in <= d <= r_out else bg
+            row += bytes(px)
+        rows.append(bytes(row))
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    png = (b"\x89PNG\r\n\x1a\n"
+           + _chunk(b"IHDR", struct.pack(">IIBBBBB", size, size,
+                                          8, 2, 0, 0, 0))
+           + _chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
+           + _chunk(b"IEND", b""))
+    _ICON_CACHE[size] = png
+    return png
+
+
 # ── DashboardServer ───────────────────────────────────────────────────────────
 
 # How long an auth token stays valid, and how many failed logins an address
@@ -1058,6 +1098,130 @@ class DashboardServer:
             if self._wake_callback:
                 self._wake_callback()
             return JSONResponse({"ok": True})
+
+
+        # ── Phone notifications (core/notify.py): PWA + Web Push ─────
+        # The manifest, service worker and icons are fetched by the
+        # browser itself — those requests carry no Authorization
+        # header — and none of them holds anything secret, so they
+        # answer without _auth. The /api/push/* and /api/notify/*
+        # routes sit behind the same bearer auth as every other
+        # /api route; the VAPID public key behind auth too, even
+        # though it is public by design, for one discipline.
+
+        @app.get("/manifest.webmanifest")
+        async def manifest():
+            name = self._assistant_name()
+            return JSONResponse({
+                "name": name,
+                "short_name": name[:12],
+                "description": f"{name} — phone dashboard",
+                "start_url": "/",
+                "scope": "/",
+                "display": "standalone",
+                "background_color": "#07090f",
+                "theme_color": "#07090f",
+                "icons": [
+                    {"src": "/icons/icon-192.png", "sizes": "192x192",
+                     "type": "image/png"},
+                    {"src": "/icons/icon-512.png", "sizes": "512x512",
+                     "type": "image/png"},
+                    {"src": "/icons/icon-512.png", "sizes": "512x512",
+                     "type": "image/png", "purpose": "maskable"},
+                ],
+            }, media_type="application/manifest+json")
+
+        @app.get("/sw.js")
+        async def service_worker():
+            return Response(_read("sw.js"),
+                            media_type="application/javascript",
+                            headers={"Cache-Control": "no-cache",
+                                     "Service-Worker-Allowed": "/"})
+
+        @app.get("/icons/icon-{size}.png")
+        async def icon(size: int):
+            if size not in (192, 512):
+                return JSONResponse({"error": "Not found"},
+                                    status_code=404)
+            return Response(_icon_png(size), media_type="image/png",
+                            headers={"Cache-Control": "max-age=86400"})
+
+        @app.get("/api/push/public-key")
+        async def push_public_key(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from core import notify
+            return JSONResponse({
+                "ok": True,
+                "public_key": notify.vapid_public_key(),
+                "webpush_available": notify.webpush_available(),
+            })
+
+        @app.post("/api/push/subscribe")
+        async def push_subscribe(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"ok": False, "error": "Bad JSON"},
+                                    status_code=400)
+            sub = body.get("subscription") if isinstance(body, dict) else None
+            if not isinstance(sub, dict):
+                sub = body if isinstance(body, dict) else {}
+            from core import notify
+            if not notify.add_subscription(sub):
+                return JSONResponse(
+                    {"ok": False,
+                     "error": "Not a push subscription (endpoint and "
+                              "keys.p256dh/auth are required)"},
+                    status_code=400)
+            return JSONResponse({"ok": True,
+                                 "subscriptions": notify.subscription_count()})
+
+        @app.post("/api/push/unsubscribe")
+        async def push_unsubscribe(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            from core import notify
+            removed = notify.remove_subscription(
+                (body or {}).get("endpoint", ""))
+            return JSONResponse({"ok": True, "removed": removed,
+                                 "subscriptions": notify.subscription_count()})
+
+        @app.get("/api/push/status")
+        async def push_status(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from core import notify
+            return JSONResponse({"ok": True, **notify.status()})
+
+        @app.get("/api/notify/queue")
+        async def notify_queue(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            from core import notify
+            return JSONResponse({"ok": True, "items": notify.queued()})
+
+        @app.post("/api/notify/dismiss")
+        async def notify_dismiss(req: Request):
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            from core import notify
+            if (body or {}).get("all"):
+                removed = notify.dismiss()
+            else:
+                removed = notify.dismiss((body or {}).get("id"))
+            return JSONResponse({"ok": True, "removed": removed,
+                                 "items": notify.queued()})
 
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 

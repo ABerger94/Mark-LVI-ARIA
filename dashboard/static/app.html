@@ -4,6 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>__ASSISTANT_NAME__ Dashboard</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#07090f">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="__ASSISTANT_NAME__">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -120,6 +127,47 @@
     #mic-btn.unsupported { opacity: 0.3; cursor: not-allowed; }
     @keyframes mic-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.65;transform:scale(0.97)} }
 
+    /* ── NOTIFICATIONS ── */
+    #notif-btn {
+      position:relative; background:var(--surface); border:1px solid var(--border);
+      color:var(--muted); padding:7px 11px; font-size:15px; line-height:1;
+      border-radius:10px; cursor:pointer; flex-shrink:0;
+    }
+    #notif-badge {
+      position:absolute; top:-5px; right:-5px; min-width:16px; height:16px;
+      border-radius:99px; background:#f87171; color:#fff; font-size:10px;
+      font-weight:700; line-height:16px; text-align:center; padding:0 4px;
+      display:none;
+    }
+    #notif-panel {
+      flex-shrink:0; border-bottom:1px solid var(--border);
+      background:rgba(255,255,255,0.02); padding:12px 16px;
+      max-height:55%; overflow-y:auto;
+    }
+    .np-head { font-size:10px; font-weight:700; letter-spacing:2px; color:var(--muted); margin-bottom:8px; }
+    .np-sub { margin-top:14px; }
+    #notif-state { font-size:14px; font-weight:600; }
+    #notif-help { font-size:12px; color:var(--muted); line-height:1.6; margin-top:6px; display:none; }
+    .np-actions { display:flex; gap:8px; margin-top:10px; }
+    .np-off { background:var(--surface); border:1px solid var(--border); color:var(--muted); }
+    .nq-item {
+      display:flex; gap:10px; align-items:flex-start; padding:9px 11px;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:10px; margin-bottom:7px;
+    }
+    .nq-main { flex:1; min-width:0; }
+    .nq-title { font-size:13px; font-weight:700; }
+    .nq-body { font-size:13px; margin-top:2px; line-height:1.45; }
+    .nq-when { font-size:10px; color:var(--muted); margin-top:3px; }
+    .nq-x { background:none; border:none; color:var(--muted); font-size:13px; cursor:pointer; padding:2px 4px; flex-shrink:0; }
+    .nq-empty { font-size:12px; color:var(--muted); }
+    .nq-clear { background:var(--surface); border:1px solid var(--border); color:var(--muted); margin-top:2px; }
+    .msg-notif {
+      align-self:stretch; max-width:100%;
+      background:rgba(99,102,241,0.1); border:1px solid rgba(99,102,241,0.35);
+      border-radius:12px;
+    }
+    .msg-notif .lbl { color:var(--accent); opacity:0.85; }
     /* ── TOAST ── */
     #toast {
       position:fixed; top:66px; left:50%; transform:translateX(-50%) translateY(-8px);
@@ -138,9 +186,21 @@
     <div class="logo">__BRAND__</div>
     <div class="pill" id="pill"><span class="dot"></span><span id="st">Connecting</span></div>
     <div class="enc-badge" id="enc">AES-GCM</div>
+    <button id="notif-btn" title="Notifications">🔔<span id="notif-badge"></span></button>
     <div class="spacer"></div>
     <div class="url">__IP__:__PORT__</div>
   </header>
+  <section id="notif-panel" style="display:none">
+    <div class="np-head">NOTIFICATIONS</div>
+    <div id="notif-state">Checking…</div>
+    <p id="notif-help"></p>
+    <div class="np-actions">
+      <button class="btn btn-send" id="notif-enable" onclick="doEnableNotif()">ENABLE</button>
+      <button class="btn np-off" id="notif-disable" onclick="doDisableNotif()">DISABLE</button>
+    </div>
+    <div class="np-head np-sub">MISSED</div>
+    <div id="notif-queue"></div>
+  </section>
   <main id="feed"></main>
   <footer>
     <input id="inp" placeholder="Send a command to __ASSISTANT_NAME__…" autocomplete="off">
@@ -257,6 +317,7 @@
       if (m.type === 'wake')          sys('Wake word detected — connecting…');
       if (m.type === 'sys')           sys(m.text);
       if (m.type === 'file_received') _onFileReceived(m);
+      if (m.type === 'notification')  showNotificationCard(m);
     };
 
     function setStatus(s) {
@@ -591,6 +652,234 @@
       }
       _micIdle();
     }
+    // ── Notifications (Web Push — core/notify.py) ─────────────────────
+    // The states this panel can show are computed from what the
+    // browser actually reports — support, install state, permission,
+    // and a live subscription check against the service worker. A
+    // state is never asserted from a click: ENABLE asks, then the
+    // state is re-read, so what the panel says is what is true.
+    //
+    // iOS, plainly: Safari only delivers push to web apps installed
+    // on the Home Screen (iOS 16.4+). In a plain Safari tab the
+    // honest state is the install instruction, not an Enable button
+    // whose subscribe call would fail.
+    const notifPanel = document.getElementById('notif-panel');
+    const notifState = document.getElementById('notif-state');
+    const notifHelp  = document.getElementById('notif-help');
+    const notifOn    = document.getElementById('notif-enable');
+    const notifOff   = document.getElementById('notif-disable');
+    const notifBadge = document.getElementById('notif-badge');
+    const notifQueue = document.getElementById('notif-queue');
+    let _swReg = null;
+
+    const _IOS_INSTALL_HELP =
+      'On iPhone, push notifications only work after this page is ' +
+      'added to your Home Screen. Tap the Share button, choose ' +
+      '"Add to Home Screen", then open __ASSISTANT_NAME__ from the ' +
+      'new icon and tap Enable here.';
+
+    document.getElementById('notif-btn').addEventListener('click', () => {
+      const open = notifPanel.style.display !== 'none';
+      notifPanel.style.display = open ? 'none' : 'block';
+      if (!open) { _refreshNotifState(); _loadNotifQueue(); }
+    });
+
+    function _isIos() { return /iphone|ipad|ipod/i.test(navigator.userAgent); }
+    function _isStandalone() {
+      return window.matchMedia('(display-mode: standalone)').matches
+          || window.navigator.standalone === true;
+    }
+    function _pushSupported() {
+      return 'serviceWorker' in navigator && 'PushManager' in window
+          && 'Notification' in window;
+    }
+
+    function _setNotif(stateText, helpText, canEnable, canDisable) {
+      notifState.textContent = stateText;
+      notifHelp.textContent = helpText || '';
+      notifHelp.style.display = helpText ? 'block' : 'none';
+      notifOn.style.display = canEnable ? 'block' : 'none';
+      notifOff.style.display = canDisable ? 'block' : 'none';
+    }
+
+    async function _refreshNotifState() {
+      if (!_pushSupported()) {
+        _setNotif('Notifications unavailable',
+          (_isIos() && !_isStandalone())
+            ? _IOS_INSTALL_HELP
+            : "This browser can't receive push notifications.",
+          false, false);
+        return;
+      }
+      if (_isIos() && !_isStandalone()) {
+        _setNotif('Add to Home Screen first', _IOS_INSTALL_HELP,
+                  false, false);
+        return;
+      }
+      if (Notification.permission === 'denied') {
+        _setNotif('Notifications blocked',
+          "Notifications are blocked for this site. Allow them in " +
+          "your browser's site settings, then come back here.",
+          false, false);
+        return;
+      }
+      try {
+        _swReg = _swReg || await navigator.serviceWorker.getRegistration();
+        const sub = _swReg
+          ? await _swReg.pushManager.getSubscription() : null;
+        if (sub) {
+          _setNotif('Notifications on for this device', '', false, true);
+        } else if (Notification.permission === 'granted') {
+          _setNotif('Permission given, not subscribed',
+            'Tap Enable to finish turning notifications on for ' +
+            'this device.', true, false);
+        } else {
+          _setNotif('Notifications off for this device', '', true, false);
+        }
+      } catch (e) {
+        _setNotif('Notifications unavailable',
+          'The notification service could not be reached on this ' +
+          'device.', false, false);
+      }
+    }
+
+    function _urlB64ToUint8Array(b64) {
+      const pad = '='.repeat((4 - b64.length % 4) % 4);
+      const base = (b64 + pad).replace(/-/g, '+').replace(/_/g, '/');
+      const raw = atob(base);
+      const out = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+      return out;
+    }
+
+    async function doEnableNotif() {
+      try {
+        const perm = await Notification.requestPermission();
+        if (perm !== 'granted') { _refreshNotifState(); return; }
+        const keyRes  = await _authFetch('/api/push/public-key');
+        const keyBody = await keyRes.json();
+        if (!keyBody.public_key) {
+          _setNotif('Notifications unavailable',
+            'The computer could not set up push notifications — ' +
+            'the push library may not be installed there.',
+            false, false);
+          return;
+        }
+        const reg = _swReg
+          || await navigator.serviceWorker.register('/sw.js');
+        _swReg = reg;
+        const sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: _urlB64ToUint8Array(keyBody.public_key),
+        });
+        await _authFetch('/api/push/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sub.toJSON()),
+        });
+        toast('Notifications on');
+      } catch (e) {
+        sys('Could not enable notifications: ' + e.message);
+      }
+      _refreshNotifState();
+    }
+
+    async function doDisableNotif() {
+      try {
+        const reg = _swReg
+          || await navigator.serviceWorker.getRegistration();
+        const sub = reg
+          ? await reg.pushManager.getSubscription() : null;
+        if (sub) {
+          await _authFetch('/api/push/unsubscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ endpoint: sub.endpoint }),
+          });
+          await sub.unsubscribe();
+        }
+      } catch (e) { /* the state refresh below reports what is true */ }
+      _refreshNotifState();
+    }
+
+    // ── The missed queue ──────────────────────────────────────────────
+    async function _loadNotifQueue() {
+      try {
+        const r = await _authFetch('/api/notify/queue');
+        const body = await r.json();
+        _renderNotifQueue(body.items || []);
+      } catch (e) { /* leave the panel and badge as they were */ }
+    }
+
+    function _renderNotifQueue(items) {
+      notifBadge.textContent = items.length;
+      notifBadge.style.display = items.length ? 'block' : 'none';
+      notifQueue.innerHTML = '';
+      if (!items.length) {
+        notifQueue.innerHTML =
+          '<div class="nq-empty">Nothing missed.</div>';
+        return;
+      }
+      for (const it of items.slice().reverse()) {
+        const d = document.createElement('div');
+        d.className = 'nq-item';
+        const when = new Date(it.ts * 1000).toLocaleString();
+        d.innerHTML =
+          '<div class="nq-main"><div class="nq-title"></div>' +
+          '<div class="nq-body"></div><div class="nq-when">' +
+          esc(when) + '</div></div>';
+        d.querySelector('.nq-title').textContent = it.title;
+        d.querySelector('.nq-body').textContent = it.body;
+        const x = document.createElement('button');
+        x.className = 'nq-x'; x.textContent = '✕'; x.title = 'Dismiss';
+        x.addEventListener('click', () => _dismissNotif(it.id));
+        d.appendChild(x);
+        notifQueue.appendChild(d);
+      }
+      const clear = document.createElement('button');
+      clear.className = 'btn nq-clear'; clear.textContent = 'DISMISS ALL';
+      clear.addEventListener('click', () => _dismissNotif(null));
+      notifQueue.appendChild(clear);
+    }
+
+    async function _dismissNotif(id) {
+      try {
+        await _authFetch('/api/notify/dismiss', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(id ? { id } : { all: true }),
+        });
+      } catch (e) { /* the reload below shows the server's truth */ }
+      _loadNotifQueue();
+    }
+
+    // A notification arriving while the dashboard is open: a card in
+    // the feed and the toast pill, and the missed list re-read (the
+    // same delivery just joined it).
+    function showNotificationCard(m) {
+      const d = document.createElement('div');
+      d.className = 'msg msg-notif';
+      const lbl = document.createElement('div');
+      lbl.className = 'lbl';
+      lbl.textContent = '🔔 ' + (m.title || 'Notification');
+      const body = document.createElement('div');
+      body.textContent = m.body || '';
+      d.appendChild(lbl); d.appendChild(body);
+      feed.appendChild(d);
+      feed.scrollTop = feed.scrollHeight;
+      toast(m.title || 'Notification');
+      _loadNotifQueue();
+    }
+
+    // Startup: register the worker (push needs it; the registration
+    // is also how the state check finds an existing subscription)
+    // and count what was missed while the page was away.
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js')
+        .then(r => { _swReg = r; })
+        .catch(() => {});
+    }
+    _loadNotifQueue();
   </script>
 </body>
 </html>

@@ -29,6 +29,11 @@ memory/long_term.json
 memory/backups/
 memory/incidents.jsonl
 memory/*.db
+# phone-notification state (core/notify.py): subscription endpoints are
+# per-device capability URLs, and the missed queue holds notification
+# text — neither belongs in a repository
+memory/push_subscriptions.json
+memory/notify_queue.json
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/

@@ -484,10 +484,26 @@ def tick(now: Optional[float] = None) -> list[str]:
                         hits=hits)
                     if proactive_alerts_enabled():
                         for hit in hits:
-                            if not speak(pricecheck.spoken_alert(hit)):
+                            line = pricecheck.spoken_alert(hit)
+                            if not speak(line):
                                 logs.append(
                                     f"pricecheck #{tid}: alert "
                                     f"undelivered: {hit['label']}")
+                            # The phone hears about a crossing too
+                            # (core/notify.py): the same sentence she
+                            # speaks, under its own title. Guarded
+                            # like every pass in this loop — a broken
+                            # notify can never wedge the tick. (While
+                            # she sleeps the speak above queues the
+                            # line and main's hook pushes it as a
+                            # scheduler item; notify()'s same-body
+                            # window folds the two into one event.)
+                            try:
+                                from core import notify as _notify
+                                _notify.notify("Price watch", line,
+                                               source="price_watch")
+                            except Exception:
+                                pass
                     else:
                         for alert in alerts:
                             logs.append(

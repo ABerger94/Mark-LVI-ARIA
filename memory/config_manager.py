@@ -465,6 +465,48 @@ def save_proactive_alerts(enabled: bool) -> None:
 # a human debugging a stall can watch it happen without being
 # restarted out from under the evidence.
 
+
+# ── Phone notifications (Web Push) ─────────────────────────────────────
+# Whether notifications leave the machine at all (core/notify.py): the
+# live dashboard toast, the Web Push fan-out and the missed queue are
+# all sinks of the one notify() call, and this flag silences all of
+# them together. On unless explicitly switched off (the
+# engine_auto_failover idiom). Delivery still needs a phone that has
+# subscribed from the dashboard — the flag alone notifies nobody.
+#
+# The VAPID keypair is the push identity: the public half is handed to
+# the phone's browser as the applicationServerKey, the private half
+# signs every push. Generated once, on first use, by core/notify.py
+# and stored here like every other credential — one config to back
+# up, one already in .gitignore. Never regenerated once set: a new
+# keypair would orphan every existing subscription.
+
+def get_notify_enabled() -> bool:
+    return bool(load_api_keys().get("notify_enabled", True))
+
+
+def save_notify_enabled(enabled: bool) -> None:
+    data = load_api_keys()
+    data["notify_enabled"] = bool(enabled)
+    write_config(data)
+
+
+def get_vapid_keys() -> tuple[str, str]:
+    """(public, private) VAPID keys as stored, ('', '') when push has
+    never been set up. The public key is the base64url uncompressed
+    EC point the browser expects; the private key is a PEM string."""
+    data = load_api_keys()
+    pub = data.get("vapid_public_key")
+    priv = data.get("vapid_private_key")
+    return (pub if isinstance(pub, str) else "",
+            priv if isinstance(priv, str) else "")
+
+
+def save_vapid_keys(public_key: str, private_key: str) -> None:
+    _patch_config(vapid_public_key=public_key,
+                  vapid_private_key=private_key)
+
+
 def get_watchdog_enabled() -> bool:
     return bool(load_api_keys().get("watchdog_enabled", True))
 

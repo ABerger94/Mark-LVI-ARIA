@@ -88,6 +88,7 @@ from core                      import scheduler as scheduler_core
 from core                      import diagnostics as diagnostics_core
 from core                      import watchdog as watchdog_core
 from core                      import delegation as delegation_core
+from core                      import notify as notify_core
 from core                      import mcp_client as mcp_client_core
 from core.selfedit             import SelfEditWatcher
 from types                     import SimpleNamespace
@@ -668,6 +669,11 @@ class JarvisLive:
         # scheduler's say hook parks lines here instead of speaking
         # them into an empty room; wake() speaks the queue, once.
         self._pending_announce: list[str] = []
+        # Phone notifications (core/notify.py): run() binds this to
+        # notify_core.notify; the say-hook's asleep branch pushes its
+        # queued lines through it. None until bound — a session that
+        # never bound it (tests, headless) queues exactly as before.
+        self._notify_hook = None
         # Self-edit watcher (Phase D — ARIA's P4 loop, core/selfedit.py).
         # It snapshots her own source tree NOW, at boot; after every
         # completed turn the receive loop asks it to check (see
@@ -891,6 +897,7 @@ class JarvisLive:
     _DELEGATED_EXCLUDE = frozenset({
         "delegate_task", "shutdown_jarvis", "run_routine",
         "edit_own_code", "patch_own_code", "run_shell_command",
+        "notify_phone",
     })
 
     def _execute_delegated_step(self, name: str, args: dict) -> str:
@@ -2586,6 +2593,31 @@ class JarvisLive:
 
     # ── In-app scheduler ─────────────────────────────────────────
 
+    def _notify_broadcast(self, msg: dict) -> None:
+        """core/notify's toast sink: schedule the dashboard broadcast
+        on the session loop. notify() calls this from whatever
+        thread noticed something — the scheduler's tick, a tool —
+        so a call with no running loop in it hops through
+        run_coroutine_threadsafe. No dashboard (it failed to start,
+        or has not started yet): the toast is skipped — the push
+        and the missed queue already carried the notification."""
+        dash = getattr(self, "_dashboard", None)
+        if dash is None:
+            return
+        try:
+            asyncio.create_task(dash.broadcast(msg))
+            return
+        except RuntimeError:
+            pass
+        loop = getattr(self, "_loop", None)
+        if loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    dash.broadcast(msg), loop)
+            except RuntimeError:
+                pass
+
+
     def _scheduler_say(self, text: str) -> bool:
         """Delivery hook for core/scheduler: announce an exact line
         (a timer finishing, a reminder, a watch alert). Returns False
@@ -2610,6 +2642,18 @@ class JarvisLive:
             pass
         if not self._awake:
             self._pending_announce.append(text)
+            # The queue speaks it when she wakes; the phone carries
+            # it NOW (core/notify.py, bound in run()). A price
+            # crossing arrives here too, seconds after the price
+            # pass pushed it under its own title — notify()'s
+            # same-body window folds the two into one event.
+            hook = getattr(self, "_notify_hook", None)
+            if hook is not None:
+                try:
+                    from memory.config_manager import get_assistant_name
+                    hook(get_assistant_name(), text, source="scheduler")
+                except Exception:
+                    pass
             return True
         self.plugin_say(
             "Announce this to the user now, in one short sentence, "
@@ -3067,6 +3111,16 @@ class JarvisLive:
         scheduler_core.bind(say=self._scheduler_say,
                             run_prompt=self._scheduler_run,
                             briefing=self._scheduler_briefing)
+
+        # Phone notifications (core/notify.py): the say-hook's
+        # asleep branch pushes through notify_core.notify, and
+        # notify's live-toast sink is the dashboard's broadcast —
+        # bound here with the other shared services. The toast half
+        # tolerates the dashboard not existing yet (it is created
+        # below and may fail to start): the push and missed-queue
+        # sinks do not depend on it.
+        self._notify_hook = notify_core.notify
+        notify_core.bind_broadcaster(self._notify_broadcast)
 
         # Main-process watchdog (core/watchdog.py): supervises the
         # asyncio loop (heartbeat coroutine below) and the Qt loop

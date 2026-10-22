@@ -98,9 +98,9 @@ verified by size. A mirror that fails costs one incident, never the backup.
 
 ## Capabilities
 
-**89 tools** on a desktop install — 9 built in, 79 actions, plus
+**90 tools** on a desktop install — 9 built in, 80 actions, plus
 `youtube_video`, which only loads when a display is present. (A headless
-registry walk counts 88.) Tools from connected MCP servers join on top of
+registry walk counts 89.) Tools from connected MCP servers join on top of
 that, namespaced per server. The in-app **⌘ COMMANDS** overlay is the source
 of truth: it is rebuilt from the live registries every time it opens, so it
 cannot list a tool she doesn't have. The shape of the suite:
@@ -117,7 +117,7 @@ cannot list a tool she doesn't have. The shape of the suite:
 | MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` (a server connected mid-session offers its tools from the next session build) |
 | Watches | price watches (`watch_price`, `check_price_watches`, `list_price_watches`, `unwatch_price` — checks ride the scheduler), screen watches (`watch_screen`, `unwatch_screen`, `list_screen_watches`), news topic monitors (`manage_monitor`) |
 | Notes & cards | `take_note`, `read_notes`, `journal_write`; `mtg_card`, `mtg_advice` (Scryfall, keyless) |
-| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
+| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
 
 **Startup briefing.** On launch she greets you with a briefing composed in
 code — calendar, triaged inbox, weather, headlines from your monitored
@@ -190,6 +190,26 @@ the Remote Access panel warns about it beside the QR code — before any
 phone has connected, which is when a block rule can genuinely be the
 problem. The moment a phone connects, the warning hides itself: a
 connected phone disproves it.
+
+**Phone notifications.** She can reach the phone when the dashboard is
+not open, over **Web Push** — no third-party relay: the browser's own
+push service wakes the dashboard's service worker, which shows the
+notification. On iPhone that only works after the dashboard is added
+to the Home Screen (Share → **Add to Home Screen**, iOS 16.4+), and
+the dashboard's 🔔 panel says exactly that until it is true — its
+state line is read from the browser, never asserted from a click.
+Three sources feed the one `core/notify.py` call: the `notify_phone`
+tool (at most one model-initiated notification per 5 minutes, six
+per rolling hour — the ledger persists, so a restart cannot reset
+it), price-watch crossings, and scheduler lines that fire while she
+is asleep (they still queue for the wake-up as well). Every delivery
+also lands in a missed queue the panel lists on load, dismissible
+item by item; identical text inside an hour is delivered once. The
+VAPID keypair that signs pushes is generated once and stored in
+`config/api_keys.json`; `notify_enabled: false` silences every sink.
+Without the `pywebpush` package the push sink quietly drops out and
+the live toast + missed queue carry on — `GET /api/push/status`
+reports which world she is in.
 
 ---
 
