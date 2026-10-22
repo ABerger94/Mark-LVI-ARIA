@@ -24,6 +24,9 @@ if _platform.system() == "Windows":
 # nothing and makes the app launch the same way in every locale.
 import sys as _sys
 
+from core.streams import ensure_streams
+ensure_streams()   # windowless launches (pythonw) have NO stdout/stderr — give prints a file before anything can die on one (core/streams.py)
+
 for _stream in ("stdout", "stderr"):
     try:
         _s = getattr(_sys, _stream, None)

@@ -4939,8 +4939,9 @@ class RemoteKeyOverlay(QWidget):
         # reports "refused to connect" while the server is running perfectly.
         #
         # It is invisible from the HUD, which is where the person scanning the
-        # QR code is looking, and it is per-EXECUTABLE: the shortcut runs
-        # pythonw.exe while an editor runs python.exe, so it can block one launch
+        # QR code is looking, and it is per-EXECUTABLE: a windowless
+        # pythonw.exe launch and a console python.exe launch are different
+        # executables to the firewall, so a block can stop one launch
         # method and not the other on the same machine. That difference is
         # unguessable without being told, so it is said here.
         # Whatever is stopping this from working, say it HERE — beside the QR
@@ -5981,7 +5982,9 @@ class MainWindow(QMainWindow):
     def _create_desktop_shortcut(self):
         """
         Create a desktop shortcut on Windows / macOS / Linux.
-        Never opens a terminal, console, or PowerShell window on any platform.
+        The macOS and Linux launchers open no terminal. On Windows the
+        shortcut deliberately opens a CONSOLE — see the Windows branch:
+        there, a console window is the feature, not a side effect.
         """
         import stat as _stat
         script  = Path(__file__).resolve().parent / "main.py"
@@ -6001,8 +6004,23 @@ class MainWindow(QMainWindow):
             if _os == "Windows":
                 py312    = self._resolve_python312()
                 base     = py312 if py312 else python
-                pythonw  = base.parent / "pythonw.exe"
-                target   = str(pythonw if pythonw.exists() else base)
+                # The target is the CONSOLE interpreter — never the
+                # windowless pythonw. Under pythonw there is no console
+                # at all (sys.stdout / sys.stderr are None), so every
+                # status line vanishes, and a background task that
+                # prints on its startup path — the phone dashboard
+                # above all — can die without a trace while the app
+                # looks perfectly healthy. A visible console window IS
+                # the feature: this shortcut must behave exactly like
+                # `py -3.12 main.py` typed in a terminal.
+                # _resolve_python312 says WHERE Python 3.12 lives; the
+                # console-vs-windowless choice is made here, at the
+                # target-selection site.
+                if base.name.lower() == "pythonw.exe":
+                    console_py = base.parent / "python.exe"
+                    target = str(console_py if console_py.exists() else base)
+                else:
+                    target = str(base)
                 detail   = (f"Python 3.12 \u2014 {target}" if py312 else
                             f"Python 3.12 not found \u2014 used {target}")
                 lnk      = str(desktop / "A.R.I.A.lnk")
@@ -7347,8 +7365,18 @@ class MainWindow(QMainWindow):
                 if currently_on:
                     winreg.DeleteValue(reg, "JARVIS_AI")
                 else:
-                    pythonw = Path(sys.executable).parent / "pythonw.exe"
-                    exe = str(pythonw if pythonw.exists() else sys.executable)
+                    # Same rule as the desktop shortcut: register the
+                    # CONSOLE interpreter, never windowless pythonw —
+                    # an auto-started ARIA needs a real stdout, or
+                    # background work that prints at startup (the phone
+                    # dashboard) can die silently at boot. The full
+                    # reasoning lives in _create_desktop_shortcut.
+                    launch_base = Path(sys.executable)
+                    if launch_base.name.lower() == "pythonw.exe":
+                        console_py = launch_base.parent / "python.exe"
+                        exe = str(console_py if console_py.exists() else launch_base)
+                    else:
+                        exe = str(launch_base)
                     winreg.SetValueEx(reg, "JARVIS_AI", 0, winreg.REG_SZ,
                                       f'"{exe}" "{script}"')
                 winreg.CloseKey(reg)
