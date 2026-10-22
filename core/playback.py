@@ -70,6 +70,26 @@ MAX_QUEUED = 1500       # batches; ~5 min of speech at the 200 ms cap.
                          # A pathological guard only — see the header.
 _SLOW_WRITE_S = 2.0      # a ≤200 ms batch taking longer = degraded stream
 
+def cursor_horizon(out_latency_s: float, queued_s: float, *,
+                   slack_s: float = 0.15,
+                   cap_s: float = 30.0) -> float:
+    """How far ahead of the wall clock the play loop's viseme
+    cursor may legitimately sit. The cursor advances by each
+    batch's duration as batches are submitted, and batches are
+    submitted faster than they sound — so the honest bound is the
+    device latency plus the audio still queued in the writer,
+    not latency alone. The 2026-10-22 wave defect: the horizon
+    was latency + 0.15 s while the writer's deep buffer held
+    seconds of speech, so mid-utterance the cursor kept reading
+    as "drifted", re-anchored to now, and truncated the viseme
+    timeline the HUD wave and the mouth play from — the wave
+    churned through batch openings and died while buffered audio
+    was still sounding. The queued term is capped: past the cap
+    something really is wrong, and re-anchoring is the lesser
+    evil (a stalled writer must not park the mouth forever)."""
+    return (out_latency_s + slack_s
+            + min(max(queued_s, 0.0), cap_s))
+
 
 class PlaybackWriter:
     """Owns one output stream on one dedicated thread.
@@ -166,6 +186,22 @@ class PlaybackWriter:
         except queue.Full:
             self.dropped += 1             # guard tripped: the loss is
                                           # counted, never silent
+
+    def queued_seconds(self, sample_rate: int) -> float:
+        """Seconds of submitted-but-unwritten audio currently in
+        the queue (16-bit samples). The play loop's viseme cursor
+        may legitimately sit this far ahead of the wall clock —
+        plus device latency — because every queued batch still has
+        to sound. See cursor_horizon."""
+        try:
+            with self._q.mutex:
+                items = list(self._q.queue)
+        except Exception:
+            return 0.0
+        if not sample_rate:
+            return 0.0
+        total = sum(len(b) for b in items if b)
+        return total / 2.0 / float(sample_rate)
 
     def flush(self) -> None:
         """Drop every queued-but-unwritten batch (barge-in). The batch

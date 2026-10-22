@@ -296,3 +296,34 @@ def test_fallback_exc_recorded_when_chosen_device_fails():
     assert isinstance(w.fallback_exc, RuntimeError)
     assert "exclusive mode" in str(w.fallback_exc)
     w.close()
+
+
+# ── The viseme cursor's honest horizon (2026-10-22 wave defect) ──
+# The cursor advances by each batch's duration as batches are
+# submitted, and batches arrive faster than they sound — so its
+# legitimate lead over the wall clock is the queued audio, not
+# just device latency. A latency-only horizon made the play loop
+# re-anchor mid-utterance and truncate the timeline the HUD wave
+# plays from: the wave churned and died while buffered speech was
+# still sounding.
+
+from core.playback import cursor_horizon
+
+
+def test_queued_seconds_counts_unwritten_audio():
+    streams = []
+    w = PlaybackWriter(_factory(streams))   # never started: no drain
+    assert w.queued_seconds(24000) == 0.0
+    w.submit(b"\x00" * 960)                 # 480 samples = 20 ms @24k
+    w.submit(b"\x00" * 9600)                # 4800 samples = 200 ms
+    assert abs(w.queued_seconds(24000) - 0.22) < 1e-9
+
+
+def test_cursor_horizon_includes_queued_audio():
+    assert cursor_horizon(0.20, 0.0) == 0.20 + 0.15
+    assert cursor_horizon(0.20, 5.0) == 0.20 + 0.15 + 5.0
+
+
+def test_cursor_horizon_caps_a_pathological_backlog():
+    assert cursor_horizon(0.20, 999.0) == 0.20 + 0.15 + 30.0
+    assert cursor_horizon(0.20, -3.0) == 0.20 + 0.15

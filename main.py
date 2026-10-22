@@ -64,7 +64,7 @@ from memory.memory_manager import (
 # system_status).
 from core import outcome
 from core.action_loader import strip_meta
-from core.playback import PlaybackWriter
+from core.playback import PlaybackWriter, cursor_horizon
 from actions.screen_processor  import _capture_camera, _capture_screen
 from actions.system_monitor    import SystemMonitor, get_system_status
 from actions.proactive         import ProactiveEngine
@@ -2368,7 +2368,10 @@ class JarvisLive:
                     # batch starts a fresh stretch of speech, while further
                     # ahead than the buffer can hold means it has drifted.
                     now = time.time()
-                    horizon = self._out_latency + _CURSOR_SLACK
+                    horizon = cursor_horizon(
+                        self._out_latency,
+                        writer.queued_seconds(RECEIVE_SAMPLE_RATE),
+                        slack_s=_CURSOR_SLACK)
                     if not (now <= self._play_cursor <= now + horizon):
                         self._play_cursor = now + _FIRST_SOUND
                     at = self._play_cursor
