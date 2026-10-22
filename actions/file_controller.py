@@ -448,7 +448,23 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
         return f"Could not rename: {e}"
 
 
-def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
+# read_file hands back the WHOLE file in one return up to this many
+# characters — room enough for any source file or document she is
+# realistically asked to review. Past it, the read pages by character
+# offset (the partial-read note names the exact next call) instead of
+# stranding her on a truncated head with no way forward.
+_READ_CEILING = 200_000
+
+
+def _as_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def read_file(path: str, name: str = "", offset: int = 0,
+              limit: int = _READ_CEILING) -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
@@ -461,23 +477,44 @@ def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
         if not target.is_file():
             return f"Not a file: {target.name}"
 
-        content = target.read_text(encoding="utf-8", errors="ignore")
-        if len(content) > max_chars:
-            shown = content[:max_chars]
-            content = shown + f"\n\n[Truncated — {len(content)} total chars]"
-        else:
-            shown = content
+        raw = target.read_bytes()
+        try:
+            content = raw.decode("utf-8")
+            if "\x00" in content[:1024]:
+                raise UnicodeDecodeError(
+                    "utf-8", raw[:1], 0, 1, "NUL byte")
+        except UnicodeDecodeError:
+            return (f"Not text: {target.name} — it's a binary file "
+                    f"({_format_size(len(raw))}), so there is "
+                    f"nothing readable to show.")
+
+        total  = len(content)
+        offset = min(max(_as_int(offset, 0), 0), total)
+        limit  = min(max(_as_int(limit, _READ_CEILING), 1),
+                     _READ_CEILING)
+        shown  = content[offset:offset + limit]
+        end    = offset + len(shown)
+
         # If what she just read is one of her own source files, the
         # lines she actually received count toward the read-before-
-        # edit coverage in core/selfedit.py — respecting THIS reader's
-        # truncation: only `shown` was received, never the whole file
-        # (and this reader has no offset, so it is always the head).
+        # edit coverage in core/selfedit.py — exactly the lines in
+        # `shown`, beginning with the line this window opens on.
         try:
             from core import selfedit as _selfedit
-            _selfedit.note_read_text(str(target), shown)
+            _selfedit.note_read_text(
+                str(target), shown,
+                start_line=content.count("\n", 0, offset) + 1)
         except Exception:
             pass
-        return content
+
+        if end < total:
+            return shown + (
+                f"\n\n[Partial read — chars {offset}–{end} of "
+                f"{total} total. Call read_file again with "
+                f"offset={end} to continue.]")
+        if offset > 0:
+            return shown + f"\n\n[End of file — {total} total chars.]"
+        return shown
 
     except Exception as e:
         return f"Could not read file: {e}"
@@ -771,7 +808,9 @@ def file_controller(
             return rename_file(path, name=name, new_name=params.get("new_name", ""))
 
         elif action == "read":
-            return read_file(path, name=name)
+            return read_file(path, name=name,
+                             offset=params.get("offset", 0),
+                             limit=params.get("limit", _READ_CEILING))
 
         elif action == "write":
             return write_file(
@@ -813,7 +852,7 @@ def file_controller(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "file_controller",
-    "description": "Manages files and folders: list, tree, create, delete, move, copy, rename, read, write, find, disk usage. If the path is a FOLDER, use action 'list' (one level) or 'tree' (recursive overview) — action 'read' is for files only and answers 'Not a file' for folders.",
+    "description": "Manages files and folders: list, tree, create, delete, move, copy, rename, read, write, find, disk usage. If the path is a FOLDER, use action 'list' (one level) or 'tree' (recursive overview) — action 'read' is for files only and answers 'Not a file' for folders. Action 'read' returns the ENTIRE file in one call up to 200,000 characters; past that it returns a window ending with the exact offset to continue from — pass 'offset' (and optionally 'limit') to page through to the end of the file.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -852,6 +891,14 @@ TOOL = {
             "depth": {
                 "type": "INTEGER",
                 "description": "Recursion depth for action 'tree' (default 3, max 6)"
+            },
+            "offset": {
+                "type": "INTEGER",
+                "description": "For action 'read': character offset to start from (default 0). When a read comes back partial, it names the offset that continues it."
+            },
+            "limit": {
+                "type": "INTEGER",
+                "description": "For action 'read': maximum characters to return (default and maximum 200,000)"
             }
         },
         "required": [

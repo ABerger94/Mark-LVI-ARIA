@@ -204,18 +204,21 @@ def note_read_coverage(path: str, start_line: int, end_line: int) -> None:
 
 
 def note_read_text(path: str, text: str,
-                   root: Optional[Path] = None) -> None:
-    """Record coverage for a read that returned `text` starting at
-    line 1 — the shape of the general file reader (actions/
-    file_controller.read_file), whose return is the file's head,
-    truncated at its character cap. Only lines actually present in
-    the returned text count. Watched files only; anything else is
-    ignored."""
+                   root: Optional[Path] = None,
+                   start_line: int = 1) -> None:
+    """Record coverage for a read that returned `text` beginning at
+    `start_line` — the shape of the general file reader (actions/
+    file_controller.read_file): the whole file in one return, or
+    one window of it when paged by character offset. Only lines
+    actually present in the returned text count. Watched files
+    only; anything else is ignored."""
     try:
         target, refusal = _resolve_target(str(path), root)
         if refusal or not target or not text:
             return
-        note_read_coverage(target, 1, _line_count(text))
+        first = max(1, int(start_line))
+        note_read_coverage(target, first,
+                           first + _line_count(text) - 1)
     except Exception:
         pass
 
