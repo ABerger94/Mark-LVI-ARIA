@@ -1,4 +1,4 @@
-# ARIA
+# ARIA - Adaptive Robotic Intelligence Agent
 
 A personal desktop assistant with a face, a voice, and a memory — she lives on
 your Windows PC, talks in real time, drives the computer by voice, and
