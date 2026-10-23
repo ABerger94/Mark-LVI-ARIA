@@ -751,6 +751,31 @@ class DashboardServer:
                       for _ in range(PAIRING_KEY_LENGTH))
         self._pending_keys[key] = now + expiry_secs
         return key
+    def _claim_node_key(self, key: str, name: str) -> bool:
+        """Validate a phone node's pairing key — the dashboard's one
+        pairing secret, reused for the node channel, never a second one.
+
+        A fresh key waits in _pending_keys until something spends it.
+        A node that pairs with one spends it exactly as auto_login
+        does, and is remembered as a device session under that key, so
+        its reconnects validate without a new key being issued. A key
+        already spent pairing the browser lives on as that device's
+        session key (behind the live tokens) and validates too.
+        Expired pending keys validate for nobody."""
+        if not key:
+            return False
+        now = time.time()
+        exp = self._pending_keys.get(key)
+        if exp is not None:
+            if exp <= now:
+                return False
+            del self._pending_keys[key]
+            self._device_sessions[f"node:{name}"] = {"session_key": key}
+            return True
+        if any(s.get("session_key") == key
+               for s in self._device_sessions.values()):
+            return True
+        return key in self._token_keys.values()
 
     @staticmethod
     def _https_wanted() -> bool:
@@ -1251,6 +1276,83 @@ class DashboardServer:
                     {"type": "sys", "text": "Phone microphone stopped."}
                 ))
 
+        # ── Android phone node (core/node_hub.py) ─────────────────────
+        # The node connects OUT to us, so its key cannot ride the URL
+        # the way the browser endpoints' tokens do: the FIRST frame
+        # after accept() must be a hello carrying the dashboard
+        # pairing key — the same secret, checked by _claim_node_key.
+        # A bad, missing or misshapen hello closes with 4401, the
+        # node's cue to ask for a fresh pairing. After the welcome
+        # this loop is a pump: result frames route into the hub's
+        # pending futures, a ping earns a pong, and the close —
+        # whenever it comes — unregisters the node, which strands
+        # its waiting commands as failures instead of timeouts.
+        @app.websocket("/node/ws")
+        async def node_ws(websocket: WebSocket):
+            from core import node_hub
+
+            await websocket.accept()
+            name = ""
+            send = None
+            try:
+                hello = await websocket.receive_json()
+            except Exception:
+                hello = None
+            ok = isinstance(hello, dict) and hello.get("type") == "hello"
+            if ok:
+                name = str(hello.get("node") or "").strip()
+                ok = bool(name) and self._claim_node_key(
+                    str(hello.get("key") or ""), name)
+            if not ok:
+                await websocket.close(code=4401)
+                return
+
+            loop = asyncio.get_running_loop()
+
+            def _send(msg: dict) -> None:
+                # Called from tool threads: schedule the write on the
+                # loop that owns the socket, never write from here.
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        websocket.send_json(msg), loop)
+                except RuntimeError:
+                    pass
+
+            def _close() -> None:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        websocket.close(), loop)
+                except RuntimeError:
+                    pass
+
+            send = _send
+            node_hub.HUB.register(
+                name, kind=str(hello.get("kind") or ""),
+                capabilities=hello.get("capabilities") or [],
+                send=_send, close=_close)
+            await websocket.send_json({"type": "welcome", "ok": True})
+            asyncio.create_task(self.broadcast(
+                {"type": "sys", "text": f"Phone node '{name}' connected."}))
+            try:
+                while True:
+                    msg = await websocket.receive_json()
+                    if not isinstance(msg, dict):
+                        continue
+                    mtype = msg.get("type")
+                    if mtype == "result":
+                        node_hub.HUB.handle_result(msg)
+                    elif mtype == "ping":
+                        await websocket.send_json({"type": "pong"})
+                    # "pong" and anything unrecognised: nothing owed.
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                pass
+            finally:
+                node_hub.HUB.unregister(name, send=send)
+                asyncio.create_task(self.broadcast(
+                    {"type": "sys",
+                     "text": f"Phone node '{name}' disconnected."}))
         # ── File sharing ──────────────────────────────────────────────────────
 
         def _safe_filename(raw: str) -> str:
