@@ -28,6 +28,7 @@ EXAMPLE_PHRASES = {
     "forget_memory":     "Forget my old playlist",
     "undo":              "Undo that last change",
     "shutdown_jarvis":   "That's all — shut down",
+    "restart_program":   "Restart your program",
     "open_app":          "Open Spotify",
     "web_search":        "Search the web for the latest headlines",
     "weather_report":    "What's the weather like today?",

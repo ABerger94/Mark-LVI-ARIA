@@ -64,7 +64,7 @@ from memory.memory_manager import (
 # actions/*.py file and are auto-discovered by core.action_loader at startup.
 # Only tools that are tied to live-session state stay inline in this file
 # (screen_process, close_camera, save_memory, manage_monitor, shutdown_jarvis,
-# system_status).
+# restart_program, system_status).
 from core import outcome
 from core import power_intent
 from core.action_loader import strip_meta
@@ -473,6 +473,21 @@ TOOL_DECLARATIONS = [
             "Call this when the user expresses intent to end the conversation, "
             "close the assistant, say goodbye, or stop the assistant. "
             "The user can say this in ANY language."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+        }
+    },
+    {
+        "name": "restart_program",
+        "description": (
+            "Restarts the assistant's own program: this app relaunches "
+            "itself on this machine. "
+            "Call this when the user tells you to restart your program, "
+            "restart yourself, or restart the app. "
+            "This is NOT a computer restart — when the user means the "
+            "PC itself, that is computer_settings, never this."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -903,9 +918,9 @@ class JarvisLive:
     # Tool names never offered to a delegated task's model — the rule
     # and its reasons live in core/delegation.py's docstring.
     _DELEGATED_EXCLUDE = frozenset({
-        "delegate_task", "shutdown_jarvis", "run_routine",
-        "edit_own_code", "patch_own_code", "run_shell_command",
-        "notify_phone", "update_status",
+        "delegate_task", "shutdown_jarvis", "restart_program",
+        "run_routine", "edit_own_code", "patch_own_code",
+        "run_shell_command", "notify_phone", "update_status",
     })
 
     def _execute_delegated_step(self, name: str, args: dict) -> str:
@@ -1433,6 +1448,61 @@ class JarvisLive:
 
         asyncio.create_task(_run())
 
+    # ── program restart (the restart_program tool) ──────────────────
+
+    def _restart_program(self) -> str:
+        """The user told her to restart her program ("restart your
+        program", "restart yourself", "restart the app"): announce
+        it, let the announcement finish speaking, then relaunch —
+        riding the code watcher's machinery exactly: the announce
+        goes through speak(), the shared restart arbiter is armed
+        (so no second restart path can race this one), a waiter
+        thread holds for the bounded speech drain, and the relaunch
+        itself is _restart_after_self_edit (summary save, Popen of
+        the same interpreter + script, exit). NOT confirm-gated:
+        the user's direct command is the authorisation, and the
+        announcement is the notice.
+
+        Availability is checked BEFORE anything is armed or
+        announced: with no session loop there is nothing to
+        schedule the relaunch onto (_restart_after_self_edit would
+        silently do nothing), and with no script file there is
+        nothing to relaunch. Either reads as an honest refusal in
+        her voice — never an announced restart that doesn't happen."""
+        import os as _os
+        script = _os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+        if self._loop is None or not script or not _os.path.isfile(script):
+            return ("I can't restart my program from here — there's "
+                    "no running program for me to relaunch. Start me "
+                    "again from the desktop shortcut or the terminal "
+                    "instead.")
+        if not codewatch_core.PROCESS_ARBITER.try_arm("restart_program"):
+            return ("A restart is already on its way — give it a "
+                    "moment and I'll be back.")
+        self.ui.write_log("SYS: Program restart requested.")
+        self.speak("Restarting my program now — back in a moment.")
+        threading.Thread(target=self._wait_and_restart_program,
+                         daemon=True, name="program-restart").start()
+        return "Restarting my program now."
+
+    def _wait_and_restart_program(self) -> None:
+        """The code watcher's waiter, mirrored (core/codewatch.py):
+        give speech up to the drain bound to finish, settle briefly,
+        then relaunch. Runs on its own thread — the turn that asked
+        for the restart is long over — and _restart_after_self_edit
+        is built for off-loop callers: the watcher's waiter calls it
+        the same way."""
+        deadline = time.monotonic() + codewatch_core.DRAIN_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if not self._is_speaking:
+                break
+            time.sleep(0.5)
+        time.sleep(2.0)
+        try:
+            self._restart_after_self_edit()
+        except Exception as e:
+            print(f"[Restart] relaunch failed: {e}")
+
     def _restart_after_self_edit(self):
         """Relaunch this process on the watcher's word. Mirrors the
         shutdown path's lifecycle — save the session summary first —
@@ -1875,6 +1945,9 @@ class JarvisLive:
                     import os as _os
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())
+
+            elif name == "restart_program":
+                result = self._restart_program()
 
             elif self._action_registry.has(name):
                 # file_processor: fall back to the currently-uploaded file when none is given

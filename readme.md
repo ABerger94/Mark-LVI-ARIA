@@ -122,9 +122,9 @@ the Fleet tab paints.
 
 ## Capabilities
 
-**91 tools** on a desktop install — 9 built in, 81 actions, plus
+**92 tools** on a desktop install — 10 built in, 81 actions, plus
 `youtube_video`, which only loads when a display is present. (A headless
-registry walk counts 90.) Tools from connected MCP servers join on top of
+registry walk counts 91.) Tools from connected MCP servers join on top of
 that, namespaced per server. The in-app **⌘ COMMANDS** overlay is the source
 of truth: it is rebuilt from the live registries every time it opens, so it
 cannot list a tool she doesn't have. The shape of the suite:
@@ -141,7 +141,7 @@ cannot list a tool she doesn't have. The shape of the suite:
 | MCP | `mcp_setup`, `mcp_connect`, `mcp_disconnect`, `mcp_list_servers`, `mcp_remove_server` — external Model Context Protocol servers (stdio or HTTP); their tools join the dispatch as `mcp_<server>_<tool>` (a server connected mid-session offers its tools from the next session build) |
 | Watches | price watches (`watch_price`, `check_price_watches`, `list_price_watches`, `unwatch_price` — checks ride the scheduler), screen watches (`watch_screen`, `unwatch_screen`, `list_screen_watches`), news topic monitors (`manage_monitor`) |
 | Notes & cards | `take_note`, `read_notes`, `journal_write`; `mtg_card`, `mtg_advice` (Scryfall, keyless) |
-| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `update_status` (the code watcher's record plus the fleet — what is actually running right now; read-only, nothing can trigger a restart by tool), `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis` |
+| Herself | `save_memory`, `recall_memory`, `forget_memory`, `read_own_code`, `edit_own_code`, `patch_own_code`, `run_diagnostics`, `update_status` (the code watcher's record plus the fleet — what is actually running right now; read-only, nothing can trigger a restart by tool), `self_heal`, `set_backup_mirror`, `morning_briefing`, `send_message`, `notify_phone` (a push notification to your phone — rate-limited, never gated), `system_status`, `screen_process`, `close_camera`, `undo`, `shutdown_jarvis`, `restart_program` (her own program relaunching on the user's word — never the computer) |
 
 **Startup briefing.** On launch she greets you with a briefing composed in
 code — calendar, triaged inbox, weather, headlines from your monitored

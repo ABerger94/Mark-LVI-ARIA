@@ -51,8 +51,9 @@ THE GATE RULE
 
 EXCLUSIONS (decided in main.py's binding, stated here so the rule
 has one home): the delegated model is not offered delegate_task
-itself (no recursion), shutdown_jarvis (a background task does
-not end the app), run_routine (a trusted routine's pre-answered
+itself (no recursion), shutdown_jarvis and restart_program (a
+background task neither ends nor relaunches the app), run_routine
+(a trusted routine's pre-answered
 gate is the user's answer for a replay THEY set going, not for a
 task the model started), or the self-edit tools (their restart
 belongs to the conversation's lifecycle, not a worker's), or

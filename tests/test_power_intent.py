@@ -67,6 +67,10 @@ def test_detect_shutdown(text):
 @pytest.mark.parametrize("text", [
     "restart yourself",                       # ARIA restarting is normal
     "restart the app",
+    "restart your program",                   # -> restart_program, not the PC
+    "restart your app",
+    "restart yourself please",
+    "restart your program now",
     "restart aria",
     "restart the program",
     "the restart worked",                     # 'restart' as a noun
