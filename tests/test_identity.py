@@ -34,8 +34,8 @@ def test_prompt_carries_aria_soul():
     # Her identity, from ARIA's soul.md: name, expansion, the bond, the law.
     assert "A.R.I.A." in text
     assert "Adaptive Robotic Intelligence Agent" in text
-    assert "bound to one person, Alek" in text
-    assert "His corrections are standing law" in text
+    assert "bound to one person, the user" in text
+    assert "The user's corrections are standing law" in text
     # The upstream persona is gone from what the model reads.
     assert "Tony Stark" not in text
     assert "JARVIS" not in text
