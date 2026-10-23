@@ -5990,7 +5990,7 @@ class PetWindow(QWidget):
 # these own only the words. Qt-free on purpose: the wording is
 # pinnable headlessly (tests/test_status_plaques.py).
 
-_PLAQUE_VALUE_MAX = 24        # chars that fit the left rail, 7pt bold
+_PLAQUE_VALUE_MAX = 16        # chars that fit the left rail at 7pt bold (24 clipped live)
 
 
 def _plaque_fit(value) -> str:
@@ -6016,7 +6016,11 @@ def engine_plaque_text(mode, model, failover_label):
         short = str(model or "").strip()
         if short.startswith("models/"):
             short = short[len("models/"):]
-        value = short or "GEMINI LIVE"
+        if short.startswith("gemini-"):
+            short = short[len("gemini-"):]
+        if short.endswith("-preview"):
+            short = short[:-len("-preview")]
+        value = short.replace("-", " ").upper() or "GEMINI LIVE"
     return ("ENGINE", _plaque_fit(value))
 
 

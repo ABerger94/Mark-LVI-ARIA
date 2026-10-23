@@ -47,12 +47,24 @@ def test_engine_failed_over_is_marked():
         "pipeline", None, "Groq (llama-3.3-70b)") == ("ENGINE", "PIPELINE (FO)")
 
 
-def test_engine_long_model_is_fitted_with_ellipsis():
-    title, value = ui_module.engine_plaque_text(
-        "gemini", "models/gemini-3.1-flash-live-preview", None)
-    assert title == "ENGINE"
-    assert len(value) <= 24 and value.endswith("…")
-    assert value.startswith("gemini-3.1-flash")
+def test_engine_live_model_is_shorthand_that_fits():
+    # The full id ("gemini-3.1-flash-live-preview") overflowed the
+    # 148px rail and clipped at both ends on Alek's laptop; the
+    # shorthand is the same information at a width that fits.
+    assert ui_module.engine_plaque_text(
+        "gemini", "models/gemini-3.1-flash-live-preview", None) == (
+        "ENGINE", "3.1 FLASH LIVE")
+
+
+def test_plaque_values_never_exceed_the_rail():
+    for _title, value in (
+        ui_module.engine_plaque_text(
+            "gemini", "models/gemini-3.1-flash-live-preview", None),
+        ui_module.engine_plaque_text("pipeline", None, "Some Provider (a-model)"),
+        ui_module.tasks_plaque_text(5, "an_extremely_long_delegated_task_name"),
+        ui_module.state_plaque_text("LISTENING"),
+    ):
+        assert len(value) <= 16
 
 
 # ── state_plaque_text ───────────────────────────────────────────────
@@ -77,7 +89,7 @@ def test_tasks_idle_when_nothing_runs():
 
 def test_tasks_single_runner_is_named():
     assert ui_module.tasks_plaque_text(
-        1, "run_shell_command") == ("TASKS", "run_shell_command")
+        1, "spotify") == ("TASKS", "spotify")
 
 
 def test_tasks_many_show_first_plus_the_rest():
@@ -88,7 +100,7 @@ def test_tasks_many_show_first_plus_the_rest():
 def test_tasks_long_name_truncates_but_keeps_the_suffix():
     title, value = ui_module.tasks_plaque_text(2, "a_very_long_tool_name_here")
     assert title == "TASKS"
-    assert len(value) <= 24 and value.endswith("+1") and "…" in value
+    assert len(value) <= 16 and value.endswith("+1") and "…" in value
 
 
 # ── the engine-info provider (JarvisLive side) ──────────────────────
