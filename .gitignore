@@ -38,6 +38,15 @@ memory/notify_queue.json
 # that were not installed — including ones that failed validation — are
 # working state, not code. Installed plugins live in plugins/ and ARE code.
 memory/foundry/
+# ALL runtime state under memory/ (2026-10-23 repo cleanup): the running
+# app rewrites these constantly (semantic-memory embeddings, the code
+# watcher's ledger, delegated-task records, scheduler state, saved
+# routines) — operational data, never source. They were tracked once and
+# the laptop's auto-commit kept publishing fresh snapshots to this public
+# repo; untracked + ignored ends that. The memory/*.py modules are code
+# and stay tracked — this rule names JSON only.
+memory/*.json
+memory/routines/*.json
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/
