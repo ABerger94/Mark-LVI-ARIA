@@ -221,6 +221,31 @@ def _build_prompt(request: str, desired_name: Optional[str],
         "- No import-time side effects: importing the file must only define "
         "PLUGIN and run().",
         "",
+        "QUALITY RULES (each of these is a real failure a generated plugin "
+        "already shipped with — do not repeat them):",
+        "- The description is how the assistant decides which tool to "
+        "call, and a vague one loses to built-in tools. Write two or three "
+        "sentences: what the plugin does, the exact requests that should "
+        "trigger it ('play <title>', 'roll a die'), and — when it overlaps "
+        "a general built-in capability such as web or YouTube playback — "
+        "say plainly that this plugin is used FIRST for its job and the "
+        "built-in is only a fallback when it finds nothing.",
+        "- To open or play a local file on Windows, use "
+        "os.startfile(path) so it opens in the user's default app. NEVER "
+        "open a file with subprocess and 'explorer': that only opens a "
+        "folder window at the file and plays nothing.",
+        "- When searching the user's files, walk the tree (os.walk) and "
+        "match against FOLDER names as well as file names — collections "
+        "like a media library are one folder per title, and file names "
+        "often differ from the folder's title. Never build a path by "
+        "joining a title to an extension and hoping the file exists: "
+        "search first, then use the path the search actually found.",
+        "- The string run() returns is spoken aloud as fact. Only say an "
+        "action happened ('Playing X', 'Opened Y', 'Sent Z') after the "
+        "code has actually done it; when nothing was found or an action "
+        "failed, return that plainly instead of a success message.",
+        "- Address the user plainly, the way ARIA speaks — never 'sir'.",
+        "",
         "Return ONLY a single fenced python code block containing the "
         "complete file. No explanation before or after it.",
     ]

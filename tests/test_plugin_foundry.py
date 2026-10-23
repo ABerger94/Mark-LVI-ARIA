@@ -304,3 +304,33 @@ def test_foundry_validates_through_real_loader():
     assert entry["valid"], entry["error"]
     assert entry["name"] == "plugin_foundry"
     assert registry.has("plugin_foundry")
+
+
+# ── The generation prompt carries the quality lessons ────────────────────────
+# Each rule below is a failure a foundry-made plugin actually shipped with
+# (the 2026-10-22 media plugins: a vague description that lost routing to
+# the YouTube tool, playback via `explorer` that played nothing while
+# claiming success, and a path guessed from a title that could never
+# exist in a folder-per-title library). If a prompt edit ever drops one,
+# this test is the tripwire.
+
+def test_prompt_carries_quality_rules():
+    prompt = foundry._build_prompt("play a movie from my library", None,
+                                   "TEMPLATE")
+    for needle in (
+        "QUALITY RULES",
+        "used FIRST for its job",          # description must claim routing
+        "os.startfile(path)",              # open files in the default app
+        "only opens a folder window",      # ...never via explorer
+        "FOLDER names as well as file names",
+        "spoken aloud as fact",            # returns must be truthful
+        "never 'sir'",
+    ):
+        assert needle in prompt, needle
+
+
+def test_prompt_repair_retry_keeps_quality_rules():
+    prompt = foundry._build_prompt("x", "my_plugin", "TEMPLATE",
+                                   error="boom")
+    assert "QUALITY RULES" in prompt
+    assert "boom" in prompt
