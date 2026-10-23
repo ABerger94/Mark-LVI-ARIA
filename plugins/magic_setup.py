@@ -8,8 +8,12 @@ import webbrowser
 PLUGIN = {
     "name": "magic_setup",
     "description": (
-        "Opens the Convoke program, moxfield.com, and scryfall.com in separate tabs."
-        "Triggers exactly when the user says 'let's play some magic'."
+        "Set up for a Magic: The Gathering game: open the Convoke app, "
+        "moxfield.com, and scryfall.com. ALWAYS call this tool FIRST and "
+        "immediately when the user says 'let's play some magic' or anything "
+        "close ('let's play magic', 'play some magic', 'magic time'). Do NOT "
+        "reply conversationally and do NOT ask which deck - call this tool "
+        "first, then talk."
     ),
     "parameters": {
         "type": "OBJECT",
