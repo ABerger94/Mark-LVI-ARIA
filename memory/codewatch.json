@@ -1,18 +1,18 @@
 {
  "boot": {
-  "ts": 1792725215.1707597,
-  "head": "a74e13e34e19aae3b951597da143a046324d788a",
-  "watched": 165
+  "ts": 1792762037.5980043,
+  "head": "3a98fc3eb11ad8d0bcef3b69250e2b7e45767ffc",
+  "watched": 166
  },
- "last_check_ts": 1792725302.71148,
- "checks": 3,
+ "last_check_ts": 1792762349.102791,
+ "checks": 5,
  "restart_pending": false,
  "armed_by": null,
  "events": [
   {
-   "ts": 1792725215.2407174,
+   "ts": 1792762037.669962,
    "kind": "boot",
-   "detail": "watching 165 files"
+   "detail": "watching 166 files"
   }
  ]
 }
