@@ -1,0 +1,18 @@
+{
+ "boot": {
+  "ts": 1792714011.0056903,
+  "head": "30164f97e837eac682933e9ae53f8404a1eca158",
+  "watched": 158
+ },
+ "last_check_ts": null,
+ "checks": 0,
+ "restart_pending": false,
+ "armed_by": null,
+ "events": [
+  {
+   "ts": 1792714011.0876458,
+   "kind": "boot",
+   "detail": "watching 158 files"
+  }
+ ]
+}

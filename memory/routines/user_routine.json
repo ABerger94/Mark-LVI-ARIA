@@ -1,0 +1,13 @@
+{
+  "name": "user_routine",
+  "created": "2026-10-22T23:19:16.670568+00:00",
+  "trusted": false,
+  "steps": [
+    {
+      "tool": "open_app",
+      "args": {
+        "app_name": "Convoke"
+      }
+    }
+  ]
+}
