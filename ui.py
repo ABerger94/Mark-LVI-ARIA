@@ -6546,17 +6546,18 @@ class MainWindow(QMainWindow):
         return bool(self._video_on)
 
     # ------------------------------------------------------------------
-    # Icon generation — arc-reactor style, rendered with Pillow
+    # Icon generation — resonance waveform orb, rendered with Pillow
     # ------------------------------------------------------------------
     @staticmethod
-    def _build_jarvis_icon(out_path: Path) -> bool:
+    def _build_aria_icon(out_path: Path) -> bool:
         """
-        Render a JARVIS arc-reactor icon at 4× resolution and downsample
+        Render the ARIA resonance-orb icon at 4× resolution and downsample
         for crisp results at all sizes. Saves a multi-res .ico to out_path.
         Returns True on success.
         """
         try:
             import math
+            import random
             import PIL.Image
             import PIL.ImageDraw
             import PIL.ImageFilter
@@ -6564,10 +6565,26 @@ class MainWindow(QMainWindow):
             return False
 
         CYAN   = (0, 212, 255)
-        DIM    = (0, 100, 140)
+        BRIGHT = (120, 235, 255)
+        DIM    = (0, 110, 150)
         DARK   = (0, 6, 10)
-        GLOW   = (0, 160, 200)
-        WHITE  = (220, 240, 255)
+        WHITE  = (225, 245, 255)
+
+        # Equalizer spike envelope: smooth pseudo-random, seeded so every
+        # build draws the same icon.
+        _rng = random.Random(1917)
+        _spikes = []
+        _v = 0.45
+        for _i in range(48):
+            _v = max(0.12, min(1.0, _v + _rng.uniform(-0.22, 0.22)))
+            _spikes.append(_v)
+
+        def _wave_r(theta: float, R: float) -> float:
+            # The resonance ribbon: layered sines, a voice print in a circle.
+            return R * (0.56
+                        + 0.075 * math.sin(3 * theta + 0.7)
+                        + 0.05 * math.sin(5 * theta + 2.1)
+                        + 0.028 * math.sin(9 * theta + 4.0))
 
         def _render(sz: int) -> PIL.Image.Image:
             S  = sz * 4                     # draw at 4× then downscale
@@ -6575,7 +6592,7 @@ class MainWindow(QMainWindow):
             d   = PIL.ImageDraw.Draw(img)
             cx = cy = S // 2
 
-            # ── filled background circle ──────────────────────────────────
+            # ── filled background circle ──────────────────────────────────────
             R = S // 2 - 2
             d.ellipse([cx-R, cy-R, cx+R, cy+R], fill=(*DARK, 255))
 
@@ -6584,41 +6601,49 @@ class MainWindow(QMainWindow):
             d.ellipse([cx-R, cy-R, cx+R, cy+R],
                       outline=(*CYAN, 220), width=lw)
 
-            # ── mid decorative ring ───────────────────────────────────────
-            R2 = int(R * 0.72)
-            d.ellipse([cx-R2, cy-R2, cx+R2, cy+R2],
-                      outline=(*DIM, 180), width=max(1, lw // 2))
+            # ── equalizer spike ring ──────────────────────────────────────
+            r_in = R * 0.80
+            for i, v in enumerate(_spikes):
+                a = 2 * math.pi * i / len(_spikes) - math.pi / 2
+                r_out = r_in + R * 0.13 * v
+                d.line([cx + r_in * math.cos(a), cy + r_in * math.sin(a),
+                        cx + r_out * math.cos(a), cy + r_out * math.sin(a)],
+                       fill=(*DIM, 200), width=max(1, S // 90))
 
-            # ── 6 radial spokes (hex bolt) ────────────────────────────────
-            R_inner = int(R * 0.30)
-            R_outer = int(R * 0.62)
-            spoke_w = max(1, S // 80)
-            for i in range(6):
-                angle = math.radians(i * 60 - 30)
-                x1 = cx + int(R_inner * math.cos(angle))
-                y1 = cy + int(R_inner * math.sin(angle))
-                x2 = cx + int(R_outer * math.cos(angle))
-                y2 = cy + int(R_outer * math.sin(angle))
-                d.line([x1, y1, x2, y2], fill=(*GLOW, 200), width=spoke_w)
+            # ── waveform ribbon + its dim mirrored echo ──────────────────────
+            pts = []
+            for i in range(361):
+                a = 2 * math.pi * i / 360 - math.pi / 2
+                r = _wave_r(a, R)
+                pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+            d.line(pts, fill=(*CYAN, 255), width=max(2, S // 30), joint="curve")
+            pts2 = []
+            for i in range(361):
+                a = 2 * math.pi * i / 360 - math.pi / 2
+                r = R * 0.56 - (_wave_r(a, R) - R * 0.56) * 0.55 - R * 0.045
+                pts2.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+            d.line(pts2, fill=(*DIM, 170), width=max(1, S // 60), joint="curve")
 
-            # ── 6 tick marks on outer ring ────────────────────────────────
-            for i in range(6):
-                angle = math.radians(i * 60)
-                for dr in range(lw * 2):
-                    rx = (R - lw - dr)
-                    d.point(
-                        [cx + int(rx * math.cos(angle)),
-                         cy + int(rx * math.sin(angle))],
-                        fill=(*WHITE, 220),
-                    )
+            # ── comet heads riding the ribbon ───────────────────────────────
+            glow_layer = PIL.Image.new("RGBA", (S, S), (0, 0, 0, 0))
+            gd = PIL.ImageDraw.Draw(glow_layer)
+            for frac in (0.08, 0.44, 0.75):
+                a = 2 * math.pi * frac - math.pi / 2
+                r = _wave_r(a, R)
+                x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+                gr = R * 0.075
+                gd.ellipse([x-gr, y-gr, x+gr, y+gr], fill=(*CYAN, 120))
+            glow_layer = glow_layer.filter(PIL.ImageFilter.GaussianBlur(S // 22))
+            img = PIL.Image.alpha_composite(img, glow_layer)
+            d   = PIL.ImageDraw.Draw(img)
+            for frac in (0.08, 0.44, 0.75):
+                a = 2 * math.pi * frac - math.pi / 2
+                r = _wave_r(a, R)
+                x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+                cr = max(1.5, R * 0.028)
+                d.ellipse([x-cr, y-cr, x+cr, y+cr], fill=(*BRIGHT, 255))
 
-            # ── inner glowing ring ────────────────────────────────────────
-            Ri = int(R * 0.26)
-            d.ellipse([cx-Ri, cy-Ri, cx+Ri, cy+Ri],
-                      outline=(*CYAN, 255), width=max(2, lw))
-
-            # ── bright glow soft blur applied before core ─────────────────
-            # (draw a slightly larger cyan circle on a separate layer)
+            # ── core glow, inner ring, bright core ─────────────────────────────
             glow_layer = PIL.Image.new("RGBA", (S, S), (0, 0, 0, 0))
             gd = PIL.ImageDraw.Draw(glow_layer)
             Rc = int(R * 0.13)
@@ -6627,11 +6652,12 @@ class MainWindow(QMainWindow):
             glow_layer = glow_layer.filter(PIL.ImageFilter.GaussianBlur(S // 14))
             img = PIL.Image.alpha_composite(img, glow_layer)
             d   = PIL.ImageDraw.Draw(img)
-
-            # ── core dot ──────────────────────────────────────────────────
+            Ri = int(R * 0.20)
+            d.ellipse([cx-Ri, cy-Ri, cx+Ri, cy+Ri],
+                      outline=(*CYAN, 255), width=max(2, lw))
             d.ellipse([cx-Rc, cy-Rc, cx+Rc, cy+Rc], fill=(*WHITE, 255))
 
-            # ── downscale to target size ──────────────────────────────────
+            # ── downscale to target size ───────────────────────────────────
             return img.resize((sz, sz), PIL.Image.LANCZOS)
 
         try:
@@ -6647,6 +6673,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[Shortcut] ⚠️  Icon generation failed: {e}")
             return False
+
 
     @staticmethod
     def _create_lnk_windows(lnk: str, target: str, args: str,
@@ -6846,10 +6873,10 @@ class MainWindow(QMainWindow):
         python  = Path(sys.executable)
         desktop = self._get_desktop_dir()
 
-        # Arc-reactor icon (.ico — also exported as .png for Linux/macOS)
-        ico_path = Path(__file__).resolve().parent / "config" / "jarvis.ico"
+        # Resonance-orb icon (.ico — also exported as .png for Linux/macOS)
+        ico_path = Path(__file__).resolve().parent / "config" / "aria.ico"
         if not ico_path.exists():
-            self._build_jarvis_icon(ico_path)
+            self._build_aria_icon(ico_path)
 
         try:
             _os = platform.system()
