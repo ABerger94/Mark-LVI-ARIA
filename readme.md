@@ -122,9 +122,9 @@ the Fleet tab paints.
 
 ## Capabilities
 
-**92 tools** on a desktop install — 10 built in, 81 actions, plus
-`youtube_video`, which only loads when a display is present. (A headless
-registry walk counts 91.) Tools from connected MCP servers join on top of
+**93 tools** on a desktop install — 10 built in, 81 actions, plus
+`youtube_video`, which only loads when a display is present, plus the
+`plugin_foundry` plugin. (A headless registry walk counts 92.) Tools from connected MCP servers join on top of
 that, namespaced per server. The in-app **⌘ COMMANDS** overlay is the source
 of truth: it is rebuilt from the live registries every time it opens, so it
 cannot list a tool she doesn't have. The shape of the suite:
@@ -153,7 +153,11 @@ section; a slow source is skipped with a note rather than hanging the
 greeting.
 
 Plugins: drop a `.py` into `plugins/` (see `_template.py`) and it is
-discovered next launch. No plugins ship enabled in this fork.
+discovered next launch. One plugin ships in this fork: `plugin_foundry`,
+which lets ARIA write new plugins from a plain-words request. Foundry-made
+plugins are validated by the real plugin loader before they land, are
+installed switched OFF, and are enabled by hand in ⚙ settings — nothing
+she generates ever starts life running.
 
 ---
 

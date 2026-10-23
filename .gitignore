@@ -34,6 +34,10 @@ memory/*.db
 # text — neither belongs in a repository
 memory/push_subscriptions.json
 memory/notify_queue.json
+# plugin foundry staging (plugins/plugin_foundry.py): drafts ARIA generated
+# that were not installed — including ones that failed validation — are
+# working state, not code. Installed plugins live in plugins/ and ARE code.
+memory/foundry/
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/
