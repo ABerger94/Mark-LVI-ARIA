@@ -802,6 +802,7 @@ class JarvisLive:
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.get_commands = self._commands_for_ui  # Commands screen rows
+        self.ui.get_engine_info = self._engine_info_for_ui  # ENGINE status plaque (ui.py)
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
         self.ui.on_run_diagnostics = self._diagnostics_for_ui  # 🩺 DIAGNOSTICS button
 
@@ -2901,6 +2902,27 @@ class JarvisLive:
             return get_provider_mode()
         except Exception:
             return "gemini"
+
+    def _engine_info_for_ui(self) -> tuple:
+        """(mode, model, failover_label) for the ENGINE status plaque
+        (ui.py's engine_plaque_text, pulled once a second through the
+        get_engine_info bridge). Read-only and total: the plaque is
+        furniture, so any failure degrades to the plain Live default
+        rather than reaching the window's clock tick. A latched
+        failover reports its provider notice as the label — that is
+        what makes the plaque render "PIPELINE (FO)" instead of the
+        switch passing silently."""
+        try:
+            if getattr(self, "_failed_over", False):
+                return ("pipeline", None,
+                        getattr(self, "_failover_notice", None) or "pipeline")
+            if self._engine_mode() == "pipeline":
+                _ok, label = self._pipeline_failover_target()
+                return ("pipeline", label, None)
+            from core import gemini as _gemini
+            return ("gemini", _gemini.live_model(), None)
+        except Exception:
+            return ("gemini", None, None)
 
     # ── Engine failover (Phase G2) ─────────────────────────────────────
     # Gemini Live is the default brain, and its own recovery is good:

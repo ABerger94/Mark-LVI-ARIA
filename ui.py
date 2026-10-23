@@ -5983,6 +5983,72 @@ class PetWindow(QWidget):
 
 
 
+# ── Status plaques (left panel, bottom) ─────────────────────────────
+# Pure text builders for the three live plaques that replaced the
+# donor's static decorations. Each returns (title, value) for a
+# two-line plaque; the window owns the widgets and the colours,
+# these own only the words. Qt-free on purpose: the wording is
+# pinnable headlessly (tests/test_status_plaques.py).
+
+_PLAQUE_VALUE_MAX = 24        # chars that fit the left rail, 7pt bold
+
+
+def _plaque_fit(value) -> str:
+    """One plaque value, fitted: stripped, and over-long values cut
+    with an ellipsis so a plaque never wraps or overflows the rail."""
+    value = str(value or "").strip()
+    if len(value) > _PLAQUE_VALUE_MAX:
+        return value[:_PLAQUE_VALUE_MAX - 1].rstrip() + "…"
+    return value
+
+
+def engine_plaque_text(mode, model, failover_label):
+    """ENGINE plaque. Live shows the model actually in use (the
+    "models/" prefix is plumbing, not information); a deliberately
+    selected pipeline reads "PIPELINE"; a failed-over engine is
+    marked "(FO)" — a failover is a thing Alek should be able to
+    see at a glance, not discover later."""
+    if failover_label:
+        value = "PIPELINE (FO)"
+    elif mode == "pipeline":
+        value = "PIPELINE"
+    else:
+        short = str(model or "").strip()
+        if short.startswith("models/"):
+            short = short[len("models/"):]
+        value = short or "GEMINI LIVE"
+    return ("ENGINE", _plaque_fit(value))
+
+
+def state_plaque_text(state):
+    """STATE plaque: the session state word, verbatim — the same
+    string the HUD is driven by, so the two can never disagree."""
+    return ("STATE", str(state or "").strip() or "—")
+
+
+def tasks_plaque_text(count, first_name):
+    """TASKS plaque: nothing running is "IDLE"; one runner shows
+    its name; several show the first name plus how many more ride
+    along, the suffix surviving the fit."""
+    try:
+        count = int(count or 0)
+    except (TypeError, ValueError):
+        count = 0
+    name = str(first_name or "").strip()
+    if count <= 0:
+        return ("TASKS", "IDLE")
+    if count == 1:
+        return ("TASKS", _plaque_fit(name or "IDLE"))
+    if not name:
+        return ("TASKS", f"{count} RUNNING")
+    suffix = f" +{count - 1}"
+    room = _PLAQUE_VALUE_MAX - len(suffix)
+    if len(name) > room:
+        name = name[:max(0, room - 1)].rstrip() + "…"
+    return ("TASKS", f"{name}{suffix}")
+
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -6038,6 +6104,10 @@ class MainWindow(QMainWindow):
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
         self.get_commands      = None   # callable: () -> list[dict], set by JarvisLive
+        self.get_engine_info   = None   # callable: () -> (mode, model, failover_label), set by JarvisLive
+        self._plaque_engine    = None   # live status plaques, built by _build_left_panel
+        self._plaque_state     = None
+        self._plaque_tasks     = None
         self.on_run_diagnostics = None  # callable: () -> None — run the diagnostics pass, set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
@@ -7222,6 +7292,31 @@ class MainWindow(QMainWindow):
             self._refresh_fleet_pill()
         except Exception:
             pass
+        # Status plaques: the ENGINE plaque, fed by the callable
+        # JarvisLive installs (get_engine_info — mode, model, and
+        # the failover label), rendered by engine_plaque_text.
+        try:
+            if self.get_engine_info:
+                _mode, _model, _fo = self.get_engine_info()
+                _t, _v = engine_plaque_text(_mode, _model, _fo)
+                self._set_plaque(self._plaque_engine, _t, _v, C.PRI)
+        except Exception:
+            pass
+
+    def _set_plaque(self, label, title, value, color):
+        """One status plaque's words + colour. The plaques are plain
+        QLabels and colour lives in the stylesheet, so a state-driven
+        colour change is a stylesheet rewrite — cheap on a 1s tick
+        and on state changes. A None label is the construction-order
+        guard: refresh paths can fire before the left panel exists."""
+        if label is None:
+            return
+        label.setText(f"{title}\n{value}")
+        label.setStyleSheet(
+            f"color: {color}; background: {C.PANEL2};"
+            f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
+        )
+
 
     def _refresh_fleet_pill(self):
         """The TASKS pill + Fleet tab live refresh (the 1s clock
@@ -7241,6 +7336,28 @@ class MainWindow(QMainWindow):
         view = getattr(self, "_content_tabs_view", None)
         if view is not None and view.fleet_visible():
             view.update_fleet()
+        # Status plaques: the TASKS plaque reads the same snapshot
+        # — the first running name (an active delegated task's goal,
+        # else an in-flight tool) beside the count — so pill, tab,
+        # and plaque cannot disagree about what she is doing.
+        try:
+            snap = _fleet.snapshot()
+            count = int(snap.get("running_count") or 0)
+            first = ""
+            for _row in snap.get("delegated") or []:
+                if _row.get("active"):
+                    first = str(_row.get("name") or _row.get("goal") or "")
+                    break
+            if not first:
+                for _row in snap.get("inflight") or []:
+                    first = str(_row.get("tool") or "")
+                    if first:
+                        break
+            _t, _v = tasks_plaque_text(count, first)
+            self._set_plaque(getattr(self, "_plaque_tasks", None),
+                             _t, _v, C.TEXT_MED)
+        except Exception:
+            pass
 
     def _build_left_panel(self) -> QWidget:
         w = QWidget()
@@ -7302,19 +7419,22 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        for txt, col in [
-            ("AI CORE\nACTIVE",  C.GREEN),
-            ("SEC\nCLEARED",     C.PRI),
-            ("PROTOCOL\n" + APP_PROTOCOL,   C.TEXT_DIM),
-        ]:
-            lbl = QLabel(txt)
-            lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(
-                f"color: {col}; background: {C.PANEL2};"
-                f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
-            )
-            lay.addWidget(lbl)
+        # Live status plaques (ENGINE / STATE / TASKS): real reads
+        # from her runtime, refreshed by _tick_clock, _apply_state,
+        # and _refresh_fleet_pill. They replaced the donor's static
+        # decorations, which reported nothing at all. The words
+        # come from the module-level plaque builders above.
+        self._plaque_engine = QLabel("ENGINE\n—")
+        self._plaque_state  = QLabel("STATE\n—")
+        self._plaque_tasks  = QLabel("TASKS\nIDLE")
+        for _lbl in (self._plaque_engine, self._plaque_state,
+                     self._plaque_tasks):
+            _lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            _lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(_lbl)
+        self._set_plaque(self._plaque_engine, "ENGINE", "—", C.PRI)
+        self._set_plaque(self._plaque_state, "STATE", "—", C.TEXT_DIM)
+        self._set_plaque(self._plaque_tasks, "TASKS", "IDLE", C.TEXT_MED)
 
         return w
     def _build_right_panel(self) -> QWidget:
@@ -8991,6 +9111,22 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        # Status plaques: STATE mirrors every state change into
+        # the left rail, colour-coded (speaking green, listening
+        # accent, sleeping/muted dim). getattr: a state can land
+        # before the left panel is built.
+        _lbl = getattr(self, "_plaque_state", None)
+        if _lbl is not None:
+            if state == "SPEAKING":
+                _col = C.GREEN
+            elif state == "LISTENING":
+                _col = C.PRI
+            elif state in ("SLEEPING", "MUTED"):
+                _col = C.TEXT_DIM
+            else:
+                _col = C.TEXT_MED
+            _t, _v = state_plaque_text(state)
+            self._set_plaque(_lbl, _t, _v, _col)
 
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
@@ -9119,6 +9255,14 @@ class JarvisUI:
     @get_plugins.setter
     def get_plugins(self, cb):
         self._win.get_plugins = cb
+
+    @property
+    def get_engine_info(self):
+        return self._win.get_engine_info
+
+    @get_engine_info.setter
+    def get_engine_info(self, cb):
+        self._win.get_engine_info = cb
 
     @property
     def get_plugin_settings(self):
