@@ -27,7 +27,7 @@ _MAIN_SRC = Path(main_module.__file__).read_text(encoding="utf-8")
 
 def test_engine_live_shows_the_model_in_use():
     assert ui_module.engine_plaque_text(
-        "gemini", "models/gemini-2.5-flash", None) == ("ENGINE", "gemini-2.5-flash")
+        "gemini", "models/gemini-2.5-flash", None) == ("ENGINE", "2.5 FLASH")
 
 
 def test_engine_live_without_a_model_is_gemini_live():
