@@ -202,6 +202,19 @@ needed.
   edges — drawn under whichever centrepiece is active, in its state
   colours, stepped on the existing animation tick.
 - **Conversation log:** the session transcript, capped at 600 blocks.
+- **Pet mode:** the **🐾 PET MODE** button (in the ⚙ Setup drawer, under
+  AUTO-START) shrinks her to a small frameless pet that floats on the
+  desktop while the main window hides. Two forms, switchable any time
+  from the pet's right-click menu: the **character** — a little robot
+  with an OLED face whose expressions follow what she's doing — and the
+  **waveform orb**, her Resonance core at pet size. The pet reads the
+  same live state the HUD does and invents nothing: the audio level
+  drives her mouth and the orb, background work in flight (Fleet's
+  count) makes her think, a pending confirmation pulses her antenna
+  amber, and she sleeps when she sleeps. Drag her anywhere (the spot
+  is remembered), click her to wake her or raise the main window,
+  double-click to come back to the full window. Pet mode is sticky:
+  leave her as the pet and she starts as the pet next launch.
 - **Overlays:** **⌘ COMMANDS** (every tool, from the registries),
   **🧠 MEMORY** (every stored fact, when she learned it, forgettable),
   **⚙ CUSTOMISE ASSISTANT** (name, voice, colour, engine panels).

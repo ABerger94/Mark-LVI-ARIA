@@ -304,6 +304,65 @@ def save_hud_style(style: str) -> None:
     _save_flag("hud_style", s if s in HUD_STYLES else "face")
 
 
+PET_FORMS = ("bot", "orb")
+
+
+def get_pet_form() -> str:
+    """Which shape the desktop pet takes: "bot" — the little robot
+    character with the OLED face — or "orb", her waveform core shrunk
+    to pet size.
+
+    The character is the default because that is the one Alek picked
+    (2026-10-22); the orb stays one right-click away, and the choice
+    survives restarts like every other display preference here.
+    """
+    v = str(load_api_keys().get("pet_form", "bot")).strip().lower()
+    return v if v in PET_FORMS else "bot"
+
+
+def save_pet_form(form: str) -> None:
+    f = str(form or "").strip().lower()
+    _save_flag("pet_form", f if f in PET_FORMS else "bot")
+
+
+def get_pet_pos():
+    """Where the pet window was last parked, as [x, y] global pixels —
+    or None when it has never been moved, in which case the pet window
+    picks its own first spot (bottom-right of the primary screen)."""
+    v = load_api_keys().get("pet_pos")
+    if isinstance(v, (list, tuple)) and len(v) == 2:
+        try:
+            return [int(v[0]), int(v[1])]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def save_pet_pos(pos) -> None:
+    """Persist the pet's parked position. Junk input is ignored rather
+    than stored — a corrupt position must never strand the pet
+    off-screen on the next launch."""
+    try:
+        xy = [int(pos[0]), int(pos[1])]
+    except Exception:
+        return
+    _save_flag("pet_pos", xy)
+
+
+def get_pet_mode_enabled() -> bool:
+    """Whether ARIA was left in pet mode when she last shut down.
+
+    Pet mode is sticky (Alek, 2026-10-22): entering it sets this flag,
+    leaving it clears it, and startup reads it back — so AUTO-START
+    at login brings her up in whichever shape she was last left in.
+    """
+    return bool(load_api_keys().get("pet_mode", False))
+
+
+def save_pet_mode_enabled(enabled: bool) -> None:
+    _save_flag("pet_mode", bool(enabled))
+
+
 # ── Live-session tuning ──────────────────────────────────────────────────────
 # Everything here is optional and has a working default, so an untouched
 # config behaves exactly like a configured one. Each value is also a way out:

@@ -5222,6 +5222,767 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+# ── Desktop pet mode ────────────────────────────────────────────────────────
+# Pet mode is ARIA in miniature: a small frameless window that floats on
+# the desktop while the main window is hidden. It is a VIEW, not a second
+# assistant — everything it shows is read from state the app already
+# keeps, and it invents nothing:
+#
+#   * speaking — the HUD's own smoothed audio level (hud._amp_disp), the
+#                same feed the waveform core draws;
+#   * busy     — core.fleet.running_count() > 0 (delegated tasks, shell
+#                commands, tool calls in flight);
+#   * alert    — a confirmation banner is live on the main window
+#                (MainWindow._confirm_overlay is not None);
+#   * asleep   — MainWindow._wake_state()["awake"], the exact dict the
+#                WAKE NOW button renders from.
+#
+# Two forms, switchable from the pet's right-click menu and persisted:
+# "bot" (the robot character with the OLED face — Alek's pick) and
+# "orb" (her Resonance waveform core, shrunk). Switching is instant:
+# same window, same canvas, different painter.
+from PyQt6.QtGui import QAction, QLinearGradient, QPainterPath
+from PyQt6.QtWidgets import QMenu
+
+PET_SIZE = (240, 260)          # (width, height) of the pet window
+PET_SPEAK_THRESHOLD = 0.04     # the HUD's own "live" level (see HudCanvas)
+PET_DRAG_THRESHOLD = 6         # px of travel before a press counts as a drag
+PET_HAPPY_SECONDS = 2.0        # happy face lingers this long after speech ends
+PET_IDLE_REPAINT_EVERY = 3     # quiet states repaint every Nth 30 fps tick
+
+_PET_CYAN = QColor("#7DEFFC")
+_PET_CYAN_DEEP = QColor("#25B9E8")
+_PET_AMBER = QColor("#FFB454")
+_PET_INK = QColor("#04070A")
+
+
+def pet_state_for(alert=False, amp=0.0, busy=False, awake=True, happy=False) -> str:
+    """Pet state from live inputs, in priority order: a pending
+    confirmation outranks speech (she needs an answer more than she
+    needs to look busy talking), speech outranks background work,
+    background work outranks sleep, and the short happy beat after a
+    spoken turn outranks plain listening. Pure — the tests pin this
+    table, and PetWindow feeds it real values every tick."""
+    if alert:
+        return "alert"
+    if amp > PET_SPEAK_THRESHOLD:
+        return "speaking"
+    if busy:
+        return "thinking"
+    if not awake:
+        return "sleepy"
+    if happy:
+        return "happy"
+    return "listening"
+
+
+def pet_should_repaint(state: str, amp_delta: float, ticks_since_paint: int) -> bool:
+    """Idle throttle. At 30 fps a full repaint of a 240x260 canvas is
+    cheap but not free, and a pet sits on screen all day. Animated
+    states (speaking, thinking, alert, happy) repaint every tick; the
+    quiet states (listening, sleepy) repaint on real level movement
+    or every PET_IDLE_REPAINT_EVERY ticks — still ~10 Hz, fast enough
+    for the idle bob and the blink. Pure."""
+    if state not in ("listening", "sleepy"):
+        return True
+    if amp_delta >= 0.01:
+        return True
+    return ticks_since_paint >= PET_IDLE_REPAINT_EVERY
+
+
+def clamp_pet_pos(x, y, w, h, screen_w, screen_h):
+    """Clamp a pet window position so the whole window stays on a
+    screen of the given size. Pure."""
+    max_x = max(0, int(screen_w) - int(w))
+    max_y = max(0, int(screen_h) - int(h))
+    return (min(max(int(x), 0), max_x), min(max(int(y), 0), max_y))
+
+
+class PetDragTracker:
+    """Press/move/release bookkeeping for the pet's drag-vs-click call.
+    Pure (plain coordinates in, decisions out) so the classifier is
+    testable without a window: travel beyond the threshold at any
+    point makes the gesture a drag; anything else is a click."""
+
+    def __init__(self, threshold: int = PET_DRAG_THRESHOLD):
+        self.threshold = int(threshold)
+        self._origin = None
+        self.dragging = False
+
+    def press(self, x, y) -> None:
+        self._origin = (int(x), int(y))
+        self.dragging = False
+
+    def move(self, x, y) -> bool:
+        if self._origin is None:
+            return False
+        if not self.dragging:
+            dx = int(x) - self._origin[0]
+            dy = int(y) - self._origin[1]
+            if dx * dx + dy * dy > self.threshold * self.threshold:
+                self.dragging = True
+        return self.dragging
+
+    def release(self, x, y) -> str:
+        was = self.dragging
+        if self._origin is not None and not was:
+            dx = int(x) - self._origin[0]
+            dy = int(y) - self._origin[1]
+            was = dx * dx + dy * dy > self.threshold * self.threshold
+        self._origin = None
+        self.dragging = False
+        return "drag" if was else "click"
+
+
+def _pet_glow(p, cx, cy, rx, ry, col, alpha):
+    c = QColor(col)
+    c.setAlpha(alpha)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(c)
+    p.drawEllipse(QPointF(cx, cy), rx, ry)
+
+
+class PetCanvas(QWidget):
+    """The pet's painter. One canvas, two forms: `_paint_bot` draws the
+    robot character (ported from the approved design preview,
+    lvi-build/pet_preview.py) and `_paint_orb` draws a compact
+    standalone version of the Resonance waveform core — deliberately
+    NOT a HudCanvas, which is sized and stateful for the main window;
+    this borrows its look (rings, sweeping arcs with comet heads, a
+    level-history ribbon, emission rings on peaks) at pet scale.
+
+    Inputs arrive via advance() once per timer tick from PetWindow,
+    which owns all the plumbing; the canvas only paints what it was
+    last told, which keeps it dumb and testable."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.form = "bot"
+        self.state = "listening"
+        self.alert = False
+        self.amp = 0.0
+        self._t = 0.0
+        self._last_painted_amp = 0.0
+        self._ticks_since_paint = PET_IDLE_REPAINT_EVERY  # first tick paints
+        self.skipped_frames = 0
+        self._amp_hist = deque(maxlen=144)
+        self._orb_rings = []        # spawn phases of the emission rings
+        # Interaction callbacks — wired by PetWindow.
+        self.on_click = None
+        self.on_double_click = None
+        self.on_drag_to = None      # (x, y) global top-left for the window
+        self.on_drag_end = None
+        self.on_menu = None         # (QPoint) global menu anchor
+        self._drag = PetDragTracker()
+        self._press_global = None
+        self._press_win_pos = None
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    # ── Animation ────────────────────────────────────────────────────
+    def advance(self, amp, state, alert, dt=1.0 / 30.0) -> bool:
+        """One tick with fresh inputs; returns True when it repainted.
+        The level is smoothed here with the HUD's own attack curve so
+        the mouth and the ribbon move the way the big waveform does."""
+        self._t += dt
+        target = max(0.0, min(1.0, float(amp or 0.0)))
+        prev = self.amp
+        self.amp += (target - self.amp) * 0.45
+        self._amp_hist.append(self.amp)
+        # Emission rings: spawn once per upward 0.72 crossing (the
+        # HUD's rule), capped; ages are judged in the painter.
+        if prev <= 0.72 < self.amp and len(self._orb_rings) < 6:
+            self._orb_rings.append(self._t)
+        changed = state != self.state or bool(alert) != self.alert
+        self.state = state
+        self.alert = bool(alert)
+        self._ticks_since_paint += 1
+        delta = abs(self.amp - self._last_painted_amp)
+        if changed or pet_should_repaint(self.state, delta,
+                                          self._ticks_since_paint):
+            self._ticks_since_paint = 0
+            self._last_painted_amp = self.amp
+            self.update()
+            return True
+        self.skipped_frames += 1
+        return False
+
+    # ── Painting ─────────────────────────────────────────────────────
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            if self.form == "orb":
+                self._paint_orb(p)
+            else:
+                self._paint_bot(p)
+        finally:
+            p.end()
+
+    def _paint_bot(self, p):
+        """The robot character — the design preview's draw_pet(),
+        ported 1:1 (v2 geometry). Expressions come from self.state;
+        the mouth and the chest waveform ride the smoothed level."""
+        w, h = self.width(), self.height()
+        s = min(w / 380.0, h / 520.0)
+        cx = w / 2.0
+        cy = h / 2.0 + 4.0
+        t = self._t
+        amp = self.amp
+        alert = self.alert
+        expr = {"alert": "listening", "speaking": "speaking",
+                "thinking": "thinking", "sleepy": "sleepy",
+                "happy": "happy"}.get(self.state, "listening")
+
+        bob = math.sin(t * 1.6) * 5 * s
+        cy = cy + bob
+        # hover shadow (shrinks as she bobs up)
+        sh_a = int(90 - bob * 3)
+        _pet_glow(p, cx, cy + 234 * s, 120 * s, 18 * s, QColor("#000000"), max(30, sh_a))
+        _pet_glow(p, cx, cy + 234 * s, 90 * s, 12 * s, _PET_CYAN_DEEP, 26)
+
+        # antenna
+        tip_y = cy - 240 * s
+        p.setPen(QPen(QColor("#46586C"), 5 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(cx, cy - 182 * s), QPointF(cx, tip_y + 10 * s))
+        tip_col = _PET_AMBER if alert else _PET_CYAN
+        pulse = 0.75 + 0.25 * math.sin(t * (6.0 if alert else 2.2))
+        _pet_glow(p, cx, tip_y, 17 * s * pulse, 17 * s * pulse, tip_col, 70)
+        _pet_glow(p, cx, tip_y, 8.5 * s, 8.5 * s, tip_col, 235)
+
+        # arms
+        arm_lift = amp * 14 * s if expr == "speaking" else 0.0
+        for side in (-1, 1):
+            ax = cx + side * 110 * s
+            ay = cy + 122 * s - arm_lift
+            grad = QLinearGradient(ax, ay - 34 * s, ax, ay + 34 * s)
+            grad.setColorAt(0, QColor("#33414F"))
+            grad.setColorAt(1, QColor("#1B232C"))
+            p.setBrush(grad)
+            p.setPen(QPen(QColor("#46586C"), 1.6 * s))
+            p.drawRoundedRect(QRectF(ax - 15 * s, ay - 34 * s, 30 * s, 68 * s), 15 * s, 15 * s)
+            _pet_glow(p, ax, ay + 26 * s, 6 * s, 6 * s, _PET_CYAN, 200)
+
+        # body
+        body = QRectF(cx - 86 * s, cy + 60 * s, 172 * s, 158 * s)
+        grad = QLinearGradient(body.topLeft(), body.bottomLeft())
+        grad.setColorAt(0, QColor("#2E3947"))
+        grad.setColorAt(1, QColor("#161D25"))
+        p.setBrush(grad)
+        p.setPen(QPen(QColor("#4A5E75"), 2 * s))
+        p.drawRoundedRect(body, 52 * s, 52 * s)
+        # chest core: her waveform orb, shrunk into the chest
+        ccx, ccy, cr = cx, cy + 132 * s, 37 * s
+        ring_rot = t * 40.0
+        p.setPen(QPen(_PET_CYAN_DEEP, 3.4 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(QRectF(ccx - cr, ccy - cr, 2 * cr, 2 * cr), int(-ring_rot * 16), 200 * 16)
+        p.setPen(QPen(QColor(125, 239, 252, 90), 2 * s))
+        p.drawEllipse(QPointF(ccx, ccy), cr - 7 * s, cr - 7 * s)
+        pts = []
+        n = 26
+        wamp = (3 + 15 * amp) * s
+        for i in range(n + 1):
+            x = ccx - (cr - 12 * s) + (2 * (cr - 12 * s)) * i / n
+            y = ccy + math.sin(i * 0.85 + t * 9.0) * wamp * math.sin(math.pi * i / n)
+            pts.append(QPointF(x, y))
+        p.setPen(QPen(_PET_CYAN, 3 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        for a, b in zip(pts, pts[1:]):
+            p.drawLine(a, b)
+
+        # head
+        head = QRectF(cx - 150 * s, cy - 188 * s, 300 * s, 266 * s)
+        grad = QLinearGradient(head.topLeft(), head.bottomLeft())
+        grad.setColorAt(0, QColor("#333F4E"))
+        grad.setColorAt(0.5, QColor("#232C37"))
+        grad.setColorAt(1, QColor("#171E27"))
+        p.setBrush(grad)
+        p.setPen(QPen(QColor("#54687F"), 2.2 * s))
+        p.drawRoundedRect(head, 80 * s, 80 * s)
+        # rim light along the top edge
+        p.setPen(QPen(QColor(125, 239, 252, 110), 2.4 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        rim = QPainterPath()
+        rim.moveTo(head.left() + 66 * s, head.top() + 2 * s)
+        rim.lineTo(head.right() - 66 * s, head.top() + 2 * s)
+        p.drawPath(rim)
+        # ears / side pods
+        for side in (-1, 1):
+            ex = cx + side * 156 * s
+            p.setBrush(QColor("#232C37"))
+            p.setPen(QPen(QColor("#46586C"), 1.8 * s))
+            p.drawRoundedRect(QRectF(ex - 10 * s, cy - 108 * s, 20 * s, 62 * s), 9 * s, 9 * s)
+            _pet_glow(p, ex, cy - 77 * s, 4.6 * s, 4.6 * s, _PET_CYAN_DEEP, 220)
+
+        # screen + face
+        scr = QRectF(cx - 124 * s, cy - 162 * s, 248 * s, 214 * s)
+        p.setBrush(_PET_INK)
+        p.setPen(QPen(QColor(37, 185, 232, 120), 1.6 * s))
+        p.drawRoundedRect(scr, 52 * s, 52 * s)
+        ex_l, ex_r, ey = cx - 52 * s, cx + 52 * s, cy - 92 * s
+        # blink: 0.12 s squeeze every ~3.2 s
+        ph = t % 3.2
+        blink = 0.12 if ph < 0.12 else 1.0
+        if expr == "sleepy":
+            blink = 0.16
+
+        def eye(x, y, ew, eh, col=_PET_CYAN):
+            _pet_glow(p, x, y, ew * 1.5, eh * 1.9, col, 60)
+            _pet_glow(p, x, y, ew, eh, col, 245)
+
+        def arc_eye(x, y, up=True):
+            p.setPen(QPen(_PET_CYAN, 7.5 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            r_ = QRectF(x - 21 * s, y - 13 * s, 42 * s, 30 * s)
+            if up:
+                p.drawArc(r_, 20 * 16, 140 * 16)
+            else:
+                p.drawArc(r_, 200 * 16, 140 * 16)
+
+        if expr == "happy":
+            arc_eye(ex_l, ey, up=True)
+            arc_eye(ex_r, ey, up=True)
+        elif expr == "thinking":
+            eye(ex_l, ey - 4 * s, 13 * s, 17 * s * blink)
+            eye(ex_r, ey - 14 * s, 11 * s, 13 * s * blink)
+        elif expr == "sleepy":
+            arc_eye(ex_l, ey, up=False)
+            arc_eye(ex_r, ey, up=False)
+        else:  # idle / listening / speaking
+            tall = 21 * s if expr == "listening" else 18 * s
+            eye(ex_l, ey, 13.5 * s, tall * blink)
+            eye(ex_r, ey, 13.5 * s, tall * blink)
+
+        # mouth
+        my = cy - 22 * s
+        if expr == "speaking":
+            mh = (5 + 13 * amp) * s
+            _pet_glow(p, cx, my, 13 * s, mh, _PET_CYAN, 60)
+            _pet_glow(p, cx, my, 10.5 * s, mh * 0.82, _PET_CYAN, 245)
+        elif expr == "happy":
+            p.setPen(QPen(_PET_CYAN, 6 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawArc(QRectF(cx - 17 * s, my - 13 * s, 34 * s, 26 * s), 200 * 16, 140 * 16)
+        elif expr == "thinking":
+            p.setPen(QPen(_PET_CYAN, 5.5 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(cx + 2 * s, my), QPointF(cx + 20 * s, my - 3 * s))
+        elif expr == "sleepy":
+            _pet_glow(p, cx, my, 6.5 * s, 8 * s, _PET_CYAN, 220)
+        else:
+            p.setPen(QPen(_PET_CYAN, 5.5 * s, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(cx - 10 * s, my), QPointF(cx + 10 * s, my))
+
+    def _paint_orb(self, p):
+        """The waveform orb — the Resonance core's essentials at pet
+        scale: atmosphere glow, frame rings and graduations, sweeping
+        arcs with comet heads on FIXED radii (the heads orbit; only
+        their angles move), a level-history ribbon with a mirrored
+        inner trace, one counter-rotating spike ring, emission rings
+        on peaks, and a bright core. Amber ring while a confirmation
+        waits; everything dims and slows while she sleeps."""
+        w, h = self.width(), self.height()
+        cx, cy = w / 2.0, h / 2.0
+        r = min(w, h) / 2.0 - 6.0
+        t = self._t
+        amp = self.amp
+        sleeping = self.state == "sleepy"
+        dim = 0.45 if sleeping else 1.0
+        if sleeping:
+            rate = 0.35
+        elif self.state == "thinking":
+            rate = 2.4
+        elif self.state == "speaking":
+            rate = 1.8
+        else:
+            rate = 1.0
+        main = QColor(C.PRI)
+        acc = QColor(C.ACC)
+        wscale = max(0.7, r / 150.0)
+
+        def blend(col, a):
+            c = QColor(col)
+            c.setAlphaF(max(0.0, min(1.0, a * dim)))
+            return c
+
+        def comet(rad, phi, tdir, col, scale):
+            p.setPen(Qt.PenStyle.NoPen)
+            for j in range(6, 0, -1):
+                f = j / 6.0
+                a_ = phi + tdir * f * 0.52
+                p.setBrush(blend(col, 0.5 * (1.0 - f)))
+                rr_ = max(0.5, scale * (3.0 - 2.2 * f))
+                p.drawEllipse(QPointF(cx + rad * math.cos(a_),
+                                      cy + rad * math.sin(a_)), rr_, rr_)
+            p.setBrush(blend(col, 0.95))
+            p.drawEllipse(QPointF(cx + rad * math.cos(phi),
+                                  cy + rad * math.sin(phi)),
+                          3.4 * scale, 3.4 * scale)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+
+        # 1. Atmosphere.
+        lift = 1.0 + 0.6 * amp
+        g = QRadialGradient(cx, cy, r)
+        g.setColorAt(0.0, blend(main, 0.30 * lift))
+        g.setColorAt(0.55, blend(main, 0.12 * lift))
+        g.setColorAt(1.0, blend(main, 0.0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(g))
+        p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        # 2. Alert ring — amber, breathing, outside everything else.
+        if self.alert:
+            pulse = 0.55 + 0.35 * math.sin(t * 6.0)
+            p.setPen(QPen(blend(_PET_AMBER, pulse), 2.4))
+            p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+
+        # 3. Frame rings + graduations.
+        for rr, a in ((1.00, 0.35), (0.93, 0.16)):
+            rad = r * rr
+            p.setPen(QPen(blend(main, a), 1.0))
+            p.drawEllipse(QRectF(cx - rad, cy - rad, rad * 2, rad * 2))
+        ticks = []
+        for i in range(36):
+            a_ = math.radians(i * 10.0)
+            ca, sa = math.cos(a_), math.sin(a_)
+            r0 = r * (0.885 if i % 3 == 0 else 0.945)
+            ticks.append(QLineF(cx + ca * r0, cy + sa * r0,
+                                cx + ca * r * 0.985, cy + sa * r * 0.985))
+        p.setPen(QPen(blend(main, 0.35), 1.1))
+        p.drawLines(ticks)
+
+        # 4. Sweeping arcs with comet heads (the HUD's table, shrunk).
+        for k, (rr, span, count, dirn, col, a, wid) in enumerate((
+                (0.955, 118, 2, +1, acc, 0.75, 2.0),
+                (0.845, 82, 3, -1, main, 0.38, 1.3),
+                (0.760, 150, 1, +1, acc, 0.45, 1.6),
+                (0.660, 64, 4, -1, main, 0.26, 1.1),
+                (0.545, 128, 2, +1, main, 0.30, 1.2))):
+            rad = r * rr
+            p.setPen(QPen(blend(col, a), max(1.0, wid * wscale)))
+            box = QRectF(cx - rad, cy - rad, rad * 2, rad * 2)
+            base = (t * rate * (9 + k * 6) * dirn) % 360.0
+            for sgm in range(count):
+                p.drawArc(box, int((base + sgm * (360.0 / count)) * 16),
+                          int(span * 16))
+            if dirn > 0:
+                phi = -math.radians(base + span)
+                tdir = +1
+            else:
+                phi = -math.radians(base)
+                tdir = -1
+            comet(rad, phi, tdir, col, max(0.55, wid * wscale / 2.0))
+
+        # 5. Emission rings from voice peaks (spawned in advance()).
+        alive = []
+        for stamp in self._orb_rings:
+            age = (t - stamp) / 1.6
+            if 0.0 <= age < 1.0:
+                alive.append(stamp)
+                rad = r * (0.42 + 0.85 * age)
+                p.setPen(QPen(blend(acc, 0.34 * (1.0 - age) ** 1.5), 1.8))
+                p.drawEllipse(QRectF(cx - rad, cy - rad, rad * 2, rad * 2))
+        self._orb_rings = alive
+
+        # 6. The waveform ribbon, from the level history — radius is
+        #    each sample's deviation from the window mean, plus an
+        #    idle ripple at silence. Heads orbit on the base radius.
+        hist = list(self._amp_hist)
+        nh = len(hist)
+        mean = (sum(hist) / nh) if nh else 0.0
+        base_r = r * 0.46
+        rotf = (t * 0.04 * rate) % 1.0
+
+        def _level(frac):
+            if nh == 0:
+                return 0.0
+            pos = (frac % 1.0) * nh
+            i0 = int(pos) % nh
+            i1 = (i0 + 1) % nh
+            fr = pos - int(pos)
+            return hist[i0] * (1.0 - fr) + hist[i1] * fr
+
+        def _off(frac):
+            dev = (_level(frac) - mean) * 1.9
+            idle_mag = 1.0 - min(1.0, amp * 3.0)
+            idle = (0.05 * math.sin(t * 1.2 + frac * 6.2832 * 3)
+                    + 0.03 * math.sin(t * 2.3 + frac * 6.2832 * 7 + 1.7)) * idle_mag
+            return dev + idle
+
+        n_pts = 120
+        for width, alpha, rad_scale, sign in ((5.0, 0.13, 0.42, +1),
+                                              (2.4, 0.32, 0.42, +1),
+                                              (1.5, 0.92, 0.42, +1),
+                                              (1.2, 0.35, 0.20, -1)):
+            path = QPainterPath()
+            for i in range(n_pts + 1):
+                frac = i / n_pts
+                ang = frac * 6.2832
+                if sign > 0:
+                    rad_i = base_r + _off(frac - rotf) * r * rad_scale
+                else:
+                    rad_i = base_r * 0.82 - _off(frac - rotf) * r * rad_scale
+                x = cx + rad_i * math.cos(ang)
+                y = cy + rad_i * math.sin(ang)
+                if i == 0:
+                    path.moveTo(x, y)
+                else:
+                    path.lineTo(x, y)
+            p.setPen(QPen(blend(main, alpha), width * wscale,
+                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawPath(path)
+        comet(base_r, rotf * 6.2832, -1, main, 0.6)
+
+        # 7. Spike ring, counter-rotating, from the same history.
+        ring_off = -rotf * 0.6 * 6.2832
+        spikes = []
+        for i in range(36):
+            frac = i / 36.0
+            lv = _level(frac) if nh else 0.0
+            ang = ring_off + frac * 6.2832
+            ca, sa = math.cos(ang), math.sin(ang)
+            r0 = r * 0.80
+            r1 = r0 + r * (0.03 + 0.13 * min(1.0, lv * 1.6))
+            spikes.append(QLineF(cx + ca * r0, cy + sa * r0,
+                                 cx + ca * r1, cy + sa * r1))
+        p.setPen(QPen(blend(main, 0.5), 1.4))
+        p.drawLines(spikes)
+        comet(r * 0.875, ring_off, -1, main, 0.55)
+
+        # 8. Core.
+        p.setPen(QPen(blend(acc, 0.8), 1.6))
+        p.drawEllipse(QPointF(cx, cy), r * 0.17, r * 0.17)
+        cg = QRadialGradient(cx, cy, r * 0.13)
+        cg.setColorAt(0, blend(main, 0.85))
+        cg.setColorAt(1, blend(main, 0.25))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(cg))
+        p.drawEllipse(QPointF(cx, cy), r * 0.12, r * 0.12)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+    # ── Mouse: drag to move, click to act, right-click for the menu ──
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.RightButton:
+            if self.on_menu is not None:
+                self.on_menu(e.globalPosition().toPoint())
+            return
+        if e.button() == Qt.MouseButton.LeftButton:
+            gp = e.globalPosition().toPoint()
+            self._drag.press(gp.x(), gp.y())
+            self._press_global = gp
+            win = self.window()
+            self._press_win_pos = win.pos() if win is not None else None
+
+    def mouseMoveEvent(self, e):
+        if self._press_global is None:
+            return
+        gp = e.globalPosition().toPoint()
+        if (self._drag.move(gp.x(), gp.y())
+                and self.on_drag_to is not None
+                and self._press_win_pos is not None):
+            self.on_drag_to(self._press_win_pos.x() + gp.x() - self._press_global.x(),
+                            self._press_win_pos.y() + gp.y() - self._press_global.y())
+
+    def mouseReleaseEvent(self, e):
+        if e.button() != Qt.MouseButton.LeftButton or self._press_global is None:
+            return
+        gp = e.globalPosition().toPoint()
+        kind = self._drag.release(gp.x(), gp.y())
+        self._press_global = None
+        self._press_win_pos = None
+        if kind == "drag":
+            if self.on_drag_end is not None:
+                self.on_drag_end()
+        elif self.on_click is not None:
+            self.on_click()
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.on_double_click is not None:
+            self.on_double_click()
+
+
+class PetWindow(QWidget):
+    """The floating pet window. Frameless, transparent, always on
+    top, no taskbar entry (Tool), and it never takes keyboard focus —
+    showing it must not yank the user out of whatever they are doing.
+
+    Click behaviour (decided, and written down here because a double
+    click also produces a click first): a plain click wakes her when
+    she is asleep — through MainWindow._tap_wake_manual, the WAKE NOW
+    button's own path — or raises the main window when she is awake,
+    KEEPING the pet on screen. A double click exits pet mode: pet
+    hides, main window returns. Both halves of a double click end
+    with the main window up, so the click firing first is harmless.
+    Dragging parks her anywhere; the spot persists."""
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self._owner = owner
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedSize(*PET_SIZE)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.canvas = PetCanvas(self)
+        from memory.config_manager import get_pet_form
+        self.canvas.form = get_pet_form()
+        lay.addWidget(self.canvas)
+        self.canvas.on_click = self._handle_click
+        self.canvas.on_double_click = self._exit
+        self.canvas.on_drag_to = self._drag_to
+        self.canvas.on_drag_end = self._drag_end
+        self.canvas.on_menu = self._show_menu
+        self._menu = None
+        self._act_form_bot = None
+        self._act_form_orb = None
+        self._was_speaking = False
+        self._happy_until = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)   # ~30 fps while visible
+        self._timer.timeout.connect(self._tick)
+
+    # ── Showing / parking ────────────────────────────────────────────
+    def show_at_saved_pos(self):
+        from memory.config_manager import get_pet_pos
+        pos = get_pet_pos()
+        scr = QApplication.primaryScreen()
+        geo = scr.availableGeometry() if scr is not None else None
+        if geo is not None:
+            if pos is None:
+                x = geo.width() - self.width() - 24
+                y = geo.height() - self.height() - 24
+            else:
+                x, y = pos[0] - geo.x(), pos[1] - geo.y()
+            x, y = clamp_pet_pos(x, y, self.width(), self.height(),
+                                 geo.width(), geo.height())
+            self.move(geo.x() + int(x), geo.y() + int(y))
+        elif pos is not None:
+            self.move(int(pos[0]), int(pos[1]))
+        self.show()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._timer.start()
+
+    def hideEvent(self, e):
+        self._timer.stop()
+        super().hideEvent(e)
+
+    # ── State plumbing (read-only; see the section header) ───────────
+    def _owner_awake(self) -> bool:
+        try:
+            return bool(self._owner._wake_state().get("awake", True))
+        except Exception:
+            return True
+
+    def _tick(self):
+        owner = self._owner
+        amp = 0.0
+        hud = getattr(owner, "hud", None)
+        if hud is not None:
+            try:
+                amp = float(getattr(hud, "_amp_disp", 0.0) or 0.0)
+            except Exception:
+                amp = 0.0
+        alert = getattr(owner, "_confirm_overlay", None) is not None
+        busy = False
+        try:
+            from core import fleet
+            busy = fleet.running_count() > 0
+        except Exception:
+            busy = False
+        awake = self._owner_awake()
+        now = time.monotonic()
+        speaking_now = amp > PET_SPEAK_THRESHOLD
+        if self._was_speaking and not speaking_now and awake:
+            self._happy_until = now + PET_HAPPY_SECONDS
+        self._was_speaking = speaking_now
+        state = pet_state_for(alert=alert, amp=amp, busy=busy, awake=awake,
+                              happy=now < self._happy_until)
+        self.canvas.advance(amp, state, alert)
+
+    # ── Interactions ─────────────────────────────────────────────────
+    def _handle_click(self):
+        if not self._owner_awake():
+            # Asleep: wake her, through the WAKE NOW button's own path.
+            tap = getattr(self._owner, "_tap_wake_manual", None)
+            if callable(tap):
+                tap()
+                return
+        # Awake: raise the main window; the pet stays where it is.
+        try:
+            self._owner.show()
+            self._owner.raise_()
+            self._owner.activateWindow()
+        except Exception:
+            pass
+
+    def _exit(self):
+        fn = getattr(self._owner, "_exit_pet_mode", None)
+        if callable(fn):
+            fn()
+        else:
+            self.hide()
+            try:
+                self._owner.show()
+            except Exception:
+                pass
+
+    def _drag_to(self, x, y):
+        self.move(int(x), int(y))
+
+    def _drag_end(self):
+        from memory.config_manager import save_pet_pos
+        scr = QApplication.primaryScreen()
+        if scr is not None:
+            geo = scr.availableGeometry()
+            x, y = clamp_pet_pos(self.x() - geo.x(), self.y() - geo.y(),
+                                 self.width(), self.height(),
+                                 geo.width(), geo.height())
+            self.move(geo.x() + int(x), geo.y() + int(y))
+        save_pet_pos([self.x(), self.y()])
+
+    def set_form(self, form):
+        """Switch the pet's shape — same window, same canvas, new
+        painter — and persist the choice."""
+        from memory.config_manager import get_pet_form, save_pet_form
+        save_pet_form(form)
+        self.canvas.form = get_pet_form()
+        self.canvas.update()
+
+    def _toggle_mute(self):
+        fn = getattr(self._owner, "_toggle_mute", None)
+        if callable(fn):
+            fn()
+
+    def _build_menu(self):
+        from memory.config_manager import get_pet_form
+        menu = QMenu(self)
+        act_open = menu.addAction("Open ARIA")
+        act_open.triggered.connect(self._exit)
+        menu.addSeparator()
+        cur = get_pet_form()
+        self._act_form_bot = menu.addAction("Pet form: Character")
+        self._act_form_bot.setCheckable(True)
+        self._act_form_bot.setChecked(cur == "bot")
+        self._act_form_bot.triggered.connect(lambda: self.set_form("bot"))
+        self._act_form_orb = menu.addAction("Pet form: Waveform orb")
+        self._act_form_orb.setCheckable(True)
+        self._act_form_orb.setChecked(cur == "orb")
+        self._act_form_orb.triggered.connect(lambda: self.set_form("orb"))
+        menu.addSeparator()
+        muted = bool(getattr(self._owner, "_muted", False))
+        act_mute = menu.addAction("Unmute" if muted else "Mute")
+        act_mute.triggered.connect(self._toggle_mute)
+        act_hide = menu.addAction("Hide pet")
+        act_hide.triggered.connect(self._exit)
+        self._menu = menu
+        return menu
+
+    def _show_menu(self, gp):
+        self._build_menu().exec(gp)
+
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -5273,6 +6034,7 @@ class MainWindow(QMainWindow):
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
         self.on_engine_applied = None   # callable: () -> None — engine changed in the providers panel
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
+        self._pet_window       = None   # live PetWindow, while pet mode is on
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
         self.get_commands      = None   # callable: () -> list[dict], set by JarvisLive
@@ -5552,6 +6314,13 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
+
+        # Sticky pet mode: if she was left as the pet, come back as
+        # the pet. Deferred to the event loop so construction — and
+        # main.py's first show of this window — completes first; if
+        # entering pet mode fails there, _enter_pet_mode leaves this
+        # window visible and logs. Never a boot into nothing.
+        QTimer.singleShot(0, self._maybe_enter_pet_at_boot)
 
     def _show_camera_frame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -6654,6 +7423,18 @@ class MainWindow(QMainWindow):
         self._autostart_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._autostart_btn.clicked.connect(self._toggle_autostart)
         lay.addWidget(self._autostart_btn)
+
+        self._pet_btn = QPushButton("🐾  PET MODE")
+        self._pet_btn.setFixedHeight(26)
+        self._pet_btn.setFont(QFont("Courier New", 7))
+        self._pet_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pet_btn.setStyleSheet(_BTN_STYLE_DIM)
+        self._pet_btn.setToolTip("Shrink her to a small floating pet on "
+                                 "the desktop — drag it anywhere, click "
+                                 "it to wake her, right-click for its "
+                                 "menu. Double-click the pet to come back.")
+        self._pet_btn.clicked.connect(self._enter_pet_mode)
+        lay.addWidget(self._pet_btn)
 
         cust_btn = QPushButton("⚙  CUSTOMISE ASSISTANT")
         cust_btn.setFixedHeight(26)
@@ -7765,6 +8546,76 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._refresh_wake_btns()
+
+    # ── Desktop pet mode ─────────────────────────────────────────────
+    def _enter_pet_mode(self):
+        """Hide the main window and put the pet on the desktop. The
+        pet is built lazily and only hidden once it is actually on
+        screen: if construction fails for any reason, the main
+        window stays exactly where it was and the failure is logged —
+        pet mode must never be able to strand the user with no ARIA
+        window at all."""
+        try:
+            pet = getattr(self, "_pet_window", None)
+            if pet is None:
+                pet = PetWindow(self)
+                self._pet_window = pet
+            pet.show_at_saved_pos()
+        except Exception:
+            self._pet_window = None
+            try:
+                self._log_sig.emit(
+                    "SYS: Pet mode could not start — staying in the main window.")
+            except Exception:
+                pass
+            try:
+                self.show()
+            except Exception:
+                pass
+            return
+        try:
+            from memory.config_manager import save_pet_mode_enabled
+            save_pet_mode_enabled(True)
+        except Exception:
+            pass
+        try:
+            self.hide()
+        except Exception:
+            pass
+
+    def _maybe_enter_pet_at_boot(self):
+        """Boot half of sticky pet mode: re-enter it when the saved
+        flag says she was left that way. Runs deferred from __init__
+        (QTimer.singleShot(0, ...)) so the window is fully built and
+        shown first; _enter_pet_mode's own failure path keeps the
+        main window up, so a broken pet can never boot into nothing."""
+        try:
+            from memory.config_manager import get_pet_mode_enabled
+            if not get_pet_mode_enabled():
+                return
+        except Exception:
+            return
+        self._enter_pet_mode()
+
+    def _exit_pet_mode(self):
+        """Leave pet mode: pet away, main window back up front."""
+        try:
+            from memory.config_manager import save_pet_mode_enabled
+            save_pet_mode_enabled(False)
+        except Exception:
+            pass
+        pet = getattr(self, "_pet_window", None)
+        if pet is not None:
+            try:
+                pet.hide()
+            except Exception:
+                pass
+        try:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
 
     def _update_brief_btn(self, enabled: bool):
         if not hasattr(self, '_brief_btn'):
