@@ -255,6 +255,21 @@ def _recovery_note_suffix() -> str:
     return (" " + " ".join(notes)) if notes else ""
 
 
+def _consolidation_note_suffix() -> str:
+    """The consolidation pass's line (core/consolidation.py): the
+    one-line summary of what the night's tidy changed, plus at most
+    one queued memory question — appended once, like the recovery
+    notes above, to whichever delivery speaks first. Consumed by
+    being read. Empty when the night changed nothing and nothing
+    is queued; a broken consolidation state never costs a briefing."""
+    try:
+        from core import consolidation
+        note = consolidation.briefing_note()
+    except Exception:
+        note = ""
+    return (" " + note) if note else ""
+
+
 # ── The one composition ─────────────────────────────────────────────────────
 
 def salutation_for(now: datetime) -> str:
@@ -282,7 +297,8 @@ def compose_briefing_text(now: datetime = None,
             + _email_section()
             + _weather_section(city)
             + (news_section or "")
-            + _recovery_note_suffix())
+            + _recovery_note_suffix()
+            + _consolidation_note_suffix())
 
 
 # Per-section bounds for the startup composition, in seconds. The
@@ -354,7 +370,8 @@ async def compose_startup_briefing(now: datetime = None,
     text = (f"{greeting} Today is {now.strftime('%A, %B %d')}."
             + results["calendar"] + results["email"]
             + results["weather"] + (news_section or "")
-            + _recovery_note_suffix())
+            + _recovery_note_suffix()
+            + _consolidation_note_suffix())
     return text, panel
 
 

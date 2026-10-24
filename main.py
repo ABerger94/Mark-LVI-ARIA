@@ -93,6 +93,7 @@ from core                      import diagnostics as diagnostics_core
 from core                      import watchdog as watchdog_core
 from core                      import codewatch as codewatch_core
 from core                      import delegation as delegation_core
+from core                      import consolidation as consolidation_core
 from core                      import fleet as fleet_core
 from core                      import notify as notify_core
 from core                      import mcp_client as mcp_client_core
@@ -1028,6 +1029,37 @@ class JarvisLive:
             text = getattr(resp, "text", None) or ""
         return text.strip(), calls
 
+    def _consolidation_propose(self, system_text: str,
+                               user_text: str) -> str:
+        """The consolidation pass's one-shot model seam
+        (core/consolidation.py, bound in run()). One user turn, the
+        editor's instructions as the system prompt, the SMART rung
+        — judgement work, not transcription — and the delegated
+        ladder's honest failure: no text raises, and the pass
+        records the night as skipped and writes nothing."""
+        from google.genai import types as _types
+        resp = _gemini.call(
+            [_types.Content(role="user",
+                            parts=[_types.Part(text=user_text)])],
+            tier=_gemini.SMART,
+            config=_types.GenerateContentConfig(
+                system_instruction=system_text),
+            timeout_ms=120_000)
+        if resp is None:
+            raise RuntimeError("consolidation model call failed")
+        text = (getattr(resp, "text", "") or "").strip()
+        if not text:
+            cand = (getattr(resp, "candidates", None) or [None])[0]
+            parts = []
+            if cand is not None:
+                parts = getattr(getattr(cand, "content", None),
+                                "parts", None) or []
+            text = "".join(getattr(p, "text", "") or ""
+                           for p in parts).strip()
+        if not text:
+            raise RuntimeError("consolidation turn returned no text")
+        return text
+
     # ── Wake word: state machine ─────────────────────────────────────────────
 
     def _wake_state(self) -> dict:
@@ -1760,6 +1792,12 @@ class JarvisLive:
 
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
+        try:
+            card = consolidation_core.resume_card_text()
+        except Exception:
+            card = None
+        if card:
+            mem_str = (mem_str + "\n\n" + card) if mem_str else card
         sys_prompt = _load_system_prompt()
 
         now      = datetime.now()
@@ -2993,6 +3031,29 @@ class JarvisLive:
             except Exception as e:
                 print(f"[Scheduler] ⚠️ {e}")
 
+    async def _run_consolidation_watch(self):
+        """The consolidation pass's always-running driver
+        (core/consolidation.py). scheduler.tick() only turns while
+        a Live session is connected — at 03:00 with the engine
+        down there would be no tick, and the night's run would
+        wait for the next session to start. This loop is
+        process-lifetime, like the watchdog heartbeat beside it: a
+        first pass with startup semantics (the >20h catch-up),
+        then a due-check every fifteen minutes. run_if_due is the
+        gate; the ordinary answer is "not due" and costs one state
+        read."""
+        first = True
+        while True:
+            try:
+                logs = await asyncio.to_thread(
+                    consolidation_core.run_if_due, startup=first)
+                for line in logs:
+                    print(f"[Consolidation] {line}")
+            except Exception:
+                pass
+            first = False
+            await asyncio.sleep(900)
+
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
     async def _relay_phone_audio(self) -> None:
@@ -3455,6 +3516,16 @@ class JarvisLive:
         except Exception as e:
             print(f"[Watchdog] ⚠️ not armed: {e}")
 
+        # Memory consolidation driver (core/consolidation.py): a
+        # process-lifetime due-check loop, because scheduler.tick
+        # only turns while a session is live and the nightly run is
+        # at 03:00. Guarded like the watchdog above it: a driver
+        # that cannot start must never cost the assistant.
+        try:
+            asyncio.create_task(self._run_consolidation_watch())
+        except Exception as e:
+            print(f"[Consolidation] ⚠️ driver not started: {e}")
+
         # Code watcher boot record (core/codewatch.py): the watcher
         # was built at startup — its boot snapshot is her source tree
         # as this process found it — and here, where the retired
@@ -3481,6 +3552,7 @@ class JarvisLive:
             call_model=self._delegated_model_turn,
             dispatch=self._execute_delegated_step,
             tool_declarations=self._delegated_tool_declarations)
+        consolidation_core.bind(propose=self._consolidation_propose)
 
         # Content panel tabs (UI TABS): the Inbox and Calendar tabs
         # pull from the same Gmail / iCal sources the tools speak

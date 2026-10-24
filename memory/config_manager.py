@@ -551,6 +551,25 @@ def save_presence_enabled(enabled: bool) -> None:
     write_config(data)
 
 
+# ── Memory consolidation ──────────────────────────────────────────────
+# The nightly pass (core/consolidation.py) that tidies the long-term
+# store: reconciling journal days and session summaries into it,
+# retiring what is stale, and queuing genuine conflicts as questions
+# for the morning briefing instead of resolving them silently. On by
+# default — Alek's call — with the off-switch here; the hour is local.
+def get_consolidation_settings() -> dict:
+    data = load_api_keys()
+    try:
+        hour = int(data.get("consolidation_hour", 3))
+    except (TypeError, ValueError):
+        hour = 3
+    return {
+        "consolidation_enabled":
+            bool(data.get("consolidation_enabled", True)),
+        "consolidation_hour": max(0, min(23, hour)),
+    }
+
+
 # ── Main-process watchdog ──────────────────────────────────────────────
 # Whether the watchdog supervises the two loops (core/watchdog.py):
 # a loop silent past the stale threshold is restarted, at most three

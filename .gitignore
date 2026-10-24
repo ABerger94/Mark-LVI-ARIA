@@ -47,6 +47,12 @@ memory/foundry/
 # and stay tracked — this rule names JSON only.
 memory/*.json
 memory/routines/*.json
+# the consolidation pass's two Markdown files (core/consolidation.py):
+# the resume card and the audit log are her working notes about the
+# user — the .md extension is the only thing that would let them slip
+# past the JSON rule above into the auto-commit.
+memory/resume_card.md
+memory/consolidation_log.md
 
 # ── Python build noise ────────────────────────────────────────────────────────
 __pycache__/

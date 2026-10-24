@@ -560,4 +560,15 @@ def tick(now: Optional[float] = None) -> list[str]:
         if changed:
             data["tasks"] = tasks
             _save(data)
+
+    # Memory consolidation (module-owned, like the passes above):
+    # tick kicks the nightly editor and it decides itself whether
+    # tonight's run is due. The work happens on its own thread, so
+    # a slow model call can never stall the tick loop.
+    try:
+        from core import consolidation as _consolidation
+        if _consolidation.kick():
+            logs.append("consolidation kicked")
+    except Exception:
+        pass
     return logs
