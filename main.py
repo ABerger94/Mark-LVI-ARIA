@@ -1104,12 +1104,20 @@ class JarvisLive:
             return False
 
     def _presence_busy(self) -> bool:
-        """Busy veto probe: ARIA speaking, or work in flight — the
-        fleet count (delegated tasks plus in-flight tool calls) is
-        what main already tracks for the HUD. Best-effort."""
+        """Busy veto probe: ARIA speaking, a live conversation
+        session (he is talking to her — voice input never resets
+        the Windows idle clock, so a session is the presence
+        evidence the idle signal cannot see), or work in flight —
+        the fleet count (delegated tasks plus in-flight tool calls)
+        is what main already tracks for the HUD. Best-effort."""
         with self._speaking_lock:
             if self._is_speaking:
                 return True
+        try:
+            if self.session:
+                return True
+        except Exception:
+            pass
         try:
             return fleet_core.running_count() > 0
         except Exception:

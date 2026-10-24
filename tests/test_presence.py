@@ -204,6 +204,55 @@ def test_broken_signals_fail_open():
     assert monitor.present
 
 
+def test_idle_away_does_not_flap_on_the_unlocked_level(rig):
+    """Regression, live witness 2026-10-24: locked() reads False on
+    EVERY tick of an unlocked machine, and the v1 AWAY branch read
+    that level as 'he unlocked it' — so an idle absence ended on
+    the very next tick, re-fired once the idle clock was still
+    high, and the log filled with away/back pairs (away 0m). An
+    idle absence must persist while the idle clock stays high,
+    with on_return never firing."""
+    world, clock, events, monitor = rig
+    world.idle = 600
+    monitor.tick()
+    assert not monitor.present
+    for _ in range(6):
+        clock.advance(5)
+        monitor.tick()
+        assert not monitor.present
+    assert events["away"] == ["idle"]
+    assert events["return"] == []
+
+
+def test_idle_away_ends_on_fresh_input_without_any_lock(rig):
+    world, clock, events, monitor = rig
+    world.idle = 900
+    monitor.tick()
+    assert not monitor.present
+    clock.advance(120)
+    monitor.tick()               # idle still high: stays away
+    assert not monitor.present
+    world.idle = 2               # a keystroke: the clock reset
+    monitor.tick()
+    assert monitor.present
+    assert events["return"] == [(120.0, False)]
+
+
+def test_idle_away_then_lock_then_unlock_returns(rig):
+    world, clock, events, monitor = rig
+    world.idle = 5000
+    monitor.tick()
+    assert not monitor.present
+    world.locked = True          # he locks it on his way out
+    monitor.tick()
+    assert not monitor.present
+    clock.advance(60)
+    world.locked = False         # and unlocks it when he gets back
+    monitor.tick()
+    assert monitor.present
+    assert len(events["return"]) == 1
+
+
 def test_greeting_for_is_time_aware_and_rotates():
     morning = {presence.greeting_for(9, 2000, d) for d in range(3)}
     assert len(morning) == 3                       # rotates by day

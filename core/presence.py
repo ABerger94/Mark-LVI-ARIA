@@ -197,6 +197,11 @@ class PresenceMonitor:
         self.present = True
         self._away_since: Optional[float] = None
         self.away_reason: Optional[str] = None
+        # The previous tick's locked() reading. locked() is a level
+        # signal (False on EVERY tick of an unlocked machine), so an
+        # unlock only counts as a return when it is a True→False
+        # transition — the level alone must never end an absence.
+        self._prev_locked: Optional[bool] = None
 
     # signal reads: an exception is an unknown, never a verdict
     def _idle(self):
@@ -258,7 +263,9 @@ class PresenceMonitor:
         if not self.enabled:
             return
         if self.present:
-            if self._locked() is True:
+            lk = self._locked()
+            self._prev_locked = lk
+            if lk is True:
                 self._go_away("lock")
                 return
             idle = self._idle()
@@ -267,17 +274,25 @@ class PresenceMonitor:
                     self._go_away("idle")
             return
         # AWAY: only a positive return signal brings her back.
+        # locked() reads False on every tick of an unlocked machine,
+        # so the False LEVEL is not a return (the v1 code treated it
+        # as one and flapped away/back every other tick for as long
+        # as the idle clock stayed high — witnessed live 2026-10-24).
+        # A return is the True→False transition (a real unlock), or
+        # fresh input, or both signals going unknown (fail-open).
         lk = self._locked()
+        was_locked = self._prev_locked
+        self._prev_locked = lk
         if lk is True:
             return                      # still locked: stay away
-        if lk is False:
-            self._come_back()
+        if lk is False and was_locked is True:
+            self._come_back()           # he unlocked it: a real return
             return
         idle = self._idle()
         if idle is not None and idle < self.idle_after_s:
             self._come_back()           # fresh input reset the clock
             return
-        if idle is None:
+        if lk is None and idle is None:
             # Both signals unknown: absence cannot be confirmed,
             # and fail-open means PRESENT.
             self._come_back()

@@ -177,3 +177,17 @@ def test_toggle_on_with_existing_monitor_reenables_it(cfg):
     live._ui_presence_toggle(True)
     assert mon.enabled is True
     assert any(line == "SYS: Presence on." for line in live.ui.logs)
+
+
+def test_busy_probe_counts_a_live_session_as_present_evidence(cfg):
+    """Voice input never resets the Windows idle clock, so a live
+    conversation session must veto an idle absence on its own —
+    without one, she napped mid-conversation (live witness
+    2026-10-24)."""
+    import threading
+    live = _live()
+    live._speaking_lock = threading.Lock()
+    live._is_speaking = False
+    assert live._presence_busy() is False
+    live.session = object()      # he is mid-conversation with her
+    assert live._presence_busy() is True
