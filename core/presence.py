@@ -152,6 +152,36 @@ def _in_quiet_hours(hour: int, quiet_hours) -> bool:
     return hour >= start or hour < end
 
 
+# ── Session activity (main's busy probe) ─────────────────────────────────
+
+def session_counts_as_activity(session_open: bool,
+                               seconds_since_speech: float,
+                               idle_after_s: float) -> bool:
+    """Does an open Live session count as somebody being here?
+
+    A session on its own proves nothing: it stays open for hours
+    after he walks away, and voice input never resets the Windows
+    idle clock — so the bare session WAS the veto that kept
+    presence from ever seeing an empty room (live witness
+    2026-10-24: away well over ten minutes, session open, ARIA
+    kept talking). A session counts as activity only while his
+    speech is recent — inside the same idle window the monitor
+    itself uses. The boundary is stale: exactly at the window,
+    the evidence has expired.
+
+    Pure and argument-only by design: this module never reads
+    main's speech clock (the hard rule in the header); main
+    computes the delta and passes it in. Junk numbers are not
+    activity.
+    """
+    if not session_open:
+        return False
+    try:
+        return float(seconds_since_speech) < float(idle_after_s)
+    except (TypeError, ValueError):
+        return False
+
+
 # ── The monitor ──────────────────────────────────────────────────────────
 
 class PresenceMonitor:

@@ -253,6 +253,75 @@ def test_idle_away_then_lock_then_unlock_returns(rig):
     assert len(events["return"]) == 1
 
 
+def test_session_activity_needs_an_open_session_and_recent_speech():
+    """The helper main's busy probe delegates to. Every one of
+    these fails against the old rule — 'session open' alone —
+    which counted an empty room as a conversation forever."""
+    h = presence.session_counts_as_activity
+    assert h(True, 30, 600) is True        # spoke half a minute ago
+    assert h(True, 599, 600) is True       # still inside the window
+    assert h(True, 600, 600) is False      # boundary: evidence expired
+    assert h(True, 3600, 600) is False     # open session, hour of silence
+    assert h(False, 0, 600) is False       # no session, however fresh
+    assert h(False, 30, 600) is False
+    assert h(True, None, 600) is False     # junk numbers are not activity
+    assert h(True, 30, None) is False
+
+
+def test_open_session_with_stale_speech_no_longer_vetoes_away():
+    """Regression, live witness 2026-10-24: he walked away for
+    over ten minutes with the Live session open and ARIA kept
+    talking — the busy probe's bare session veto meant AWAY could
+    never fire. The probe below is wired exactly as main wires it
+    now: the helper over (session open, seconds since his last
+    speech, the presence idle window)."""
+    world = FakeWorld()
+    clock = FakeClock()
+    events = {"away": [], "return": []}
+    session = {"open": True, "since_speech": 30.0}
+    monitor = presence.PresenceMonitor(
+        idle_signal=lambda: world.idle,
+        locked_signal=lambda: world.locked,
+        media_signal=lambda: world.media,
+        busy_probe=lambda: presence.session_counts_as_activity(
+            session["open"], session["since_speech"], 600),
+        monotonic=clock,
+        hour_fn=lambda: world.hour,
+        idle_after_s=600,
+        greet_after_s=1800,
+        quiet_hours=(23, 7),
+        enabled=True,
+        on_away=lambda reason: events["away"].append(reason),
+        on_return=lambda away_s, greet: events["return"].append(
+            (away_s, greet)),
+    )
+    world.idle = 5000          # the Windows idle clock is deep…
+    monitor.tick()
+    assert monitor.present     # …but he spoke 30s ago: veto holds
+    assert events["away"] == []
+    session["since_speech"] = 3600.0   # an hour of silence since
+    monitor.tick()
+    assert not monitor.present
+    assert events["away"] == ["idle"]
+
+
+def test_main_wires_the_recency_helper_into_presence_busy():
+    import inspect
+
+    import main
+    src = inspect.getsource(main)
+    body = src[src.index("def _presence_busy"):
+               src.index("def _presence_on_away")]
+    assert "session_counts_as_activity" in body
+    assert "_last_user_speech" in body
+    assert "_presence_idle_s" in body
+    # The window itself comes from the presence settings on start.
+    start = src[src.index("def _start_presence"):
+                src.index("async def _run_presence_watch")]
+    assert 'self._presence_idle_s = settings["presence_idle_seconds"]' \
+        in start
+
+
 def test_greeting_for_is_time_aware_and_rotates():
     morning = {presence.greeting_for(9, 2000, d) for d in range(3)}
     assert len(morning) == 3                       # rotates by day

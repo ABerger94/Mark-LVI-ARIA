@@ -822,6 +822,11 @@ class JarvisLive:
         # presence naps the HUD and pauses proactive speech, it never
         # gates the mic, typing, or a command.
         self._presence_monitor = None
+        # The idle window _presence_busy judges session speech
+        # against; _start_presence overwrites it from config. 600
+        # matches presence_idle_seconds' own default, so the probe
+        # is sane even before (or entirely without) a monitor.
+        self._presence_idle_s = 600
 
         # Restore the saved push-to-talk preference. Doing it here rather than
         # in __init__ means the hotkey thread only exists once there is a
@@ -1137,16 +1142,26 @@ class JarvisLive:
 
     def _presence_busy(self) -> bool:
         """Busy veto probe: ARIA speaking, a live conversation
-        session (he is talking to her — voice input never resets
-        the Windows idle clock, so a session is the presence
-        evidence the idle signal cannot see), or work in flight —
+        session with recent speech from him, or work in flight —
         the fleet count (delegated tasks plus in-flight tool calls)
-        is what main already tracks for the HUD. Best-effort."""
+        is what main already tracks for the HUD. Best-effort.
+
+        The session clause needs the speech recency: voice input
+        never resets the Windows idle clock, so his speech is the
+        presence evidence the idle signal cannot see — but the
+        session alone is not evidence, it outlives him walking
+        away by hours. Speech inside the idle window counts; an
+        open-but-silent session does not (core/presence.py's
+        session_counts_as_activity)."""
         with self._speaking_lock:
             if self._is_speaking:
                 return True
         try:
-            if self.session:
+            from core import presence as _presence
+            if _presence.session_counts_as_activity(
+                    bool(self.session),
+                    time.monotonic() - self._last_user_speech,
+                    getattr(self, "_presence_idle_s", 600)):
                 return True
         except Exception:
             pass
@@ -1208,6 +1223,7 @@ class JarvisLive:
                 self.ui.write_log(
                     "SYS: Presence is off (presence_enabled=false).")
                 return
+            self._presence_idle_s = settings["presence_idle_seconds"]
             monitor = _presence.PresenceMonitor(
                 idle_signal=_presence.idle_seconds,
                 locked_signal=_presence.locked,

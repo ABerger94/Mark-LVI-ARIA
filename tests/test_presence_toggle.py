@@ -181,13 +181,22 @@ def test_toggle_on_with_existing_monitor_reenables_it(cfg):
 
 def test_busy_probe_counts_a_live_session_as_present_evidence(cfg):
     """Voice input never resets the Windows idle clock, so a live
-    conversation session must veto an idle absence on its own —
-    without one, she napped mid-conversation (live witness
-    2026-10-24)."""
+    conversation session must veto an idle absence — without one,
+    she napped mid-conversation (live witness 2026-10-24).
+
+    Refined the same day, on his report: the session counts only
+    while his speech is recent (the presence idle window, 600s by
+    default). The bare session veto never expired, so when he
+    walked away mid-session AWAY could never fire and she kept
+    talking to an empty room."""
     import threading
+    import time
     live = _live()
     live._speaking_lock = threading.Lock()
     live._is_speaking = False
     assert live._presence_busy() is False
     live.session = object()      # he is mid-conversation with her
+    live._last_user_speech = time.monotonic()
     assert live._presence_busy() is True
+    live._last_user_speech = time.monotonic() - 3600   # an hour silent
+    assert live._presence_busy() is False
