@@ -564,11 +564,13 @@ def tick(now: Optional[float] = None) -> list[str]:
     # Memory consolidation (module-owned, like the passes above):
     # tick kicks the nightly editor and it decides itself whether
     # tonight's run is due. The work happens on its own thread, so
-    # a slow model call can never stall the tick loop.
+    # a slow model call can never stall the tick loop. The kick is
+    # silent — tick's log lines report things that happened, and a
+    # due-check starting is not one of them; the pass's outcomes
+    # are logged by the consolidation watch in main.py.
     try:
         from core import consolidation as _consolidation
-        if _consolidation.kick():
-            logs.append("consolidation kicked")
+        _consolidation.kick()
     except Exception:
         pass
     return logs
