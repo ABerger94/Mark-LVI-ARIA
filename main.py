@@ -834,6 +834,7 @@ class JarvisLive:
         self.ui.wake_is_ready    = wake_is_ready          # () -> bool
         self.ui.wake_get_state   = self._wake_state       # () -> dict
         self.ui.on_wake_toggle   = self._ui_wake_toggle   # (enable: bool) -> str
+        self.ui.on_presence_toggle = self._ui_presence_toggle  # SETUP drawer PRESENCE toggle
         self.ui.on_wake_manual   = self._ui_wake_manual   # () -> toggle awake/asleep
         self.ui.on_wake_install  = self._ui_wake_install  # () -> (ok, msg)
 
@@ -1200,6 +1201,39 @@ class JarvisLive:
                 await asyncio.to_thread(monitor.tick)
             except Exception:
                 pass
+
+    # ── Presence: UI callback (SETUP drawer toggle) ─────────────────────
+
+    def _ui_presence_toggle(self, enable: bool) -> None:
+        """Apply the SETUP drawer's PRESENCE toggle live.
+
+        Off unregisters the monitor (the watch loop no-ops on None;
+        scheduler and screen watches fall back to fail-open present)
+        and restores the HUD if an absence had napped it — never a
+        greeting, never touching _awake or the wake-word path. On
+        rebuilds through _start_presence, which re-reads config
+        (the drawer saves presence_enabled before calling this)."""
+        try:
+            if enable:
+                if self._presence_monitor is None:
+                    self._start_presence()
+                else:
+                    self._presence_monitor.enabled = True
+                    self.ui.write_log("SYS: Presence on.")
+                return
+            mon = self._presence_monitor
+            if mon is not None:
+                was_away = not mon.present
+                from core import presence as _presence
+                _presence.set_monitor(None)
+                self._presence_monitor = None
+                if was_away and not self.ui.muted:
+                    self.ui.set_state("LISTENING")
+            self.ui.write_log(
+                "SYS: Presence off — I'll stay put until you turn me "
+                "back on.")
+        except Exception as e:
+            print(f"[Presence] ⚠️ toggle failed: {e}")
 
     # ── Wake word: UI callbacks (called from the Qt thread) ──────────────────
 

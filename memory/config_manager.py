@@ -520,9 +520,10 @@ def save_proactive_alerts(enabled: bool) -> None:
 # runs at all, how long without keyboard/mouse input counts as
 # away, how long an absence must be before a return earns a
 # spoken greeting, and the quiet hours a late-night return never
-# greets inside. Config keys only in v1 — no SETUP-drawer toggle
-# yet (a named follow-up). Defaults mirror the spec: on, 10 min
-# idle, greet after 30 min away, quiet 23:00–07:00.
+# greets inside. Defaults mirror the spec: on, 10 min idle,
+# greet after 30 min away, quiet 23:00–07:00. The on/off key
+# also has a SETUP-drawer toggle (v1.1); the numeric knobs
+# stay config-file only.
 
 def get_presence_settings() -> dict:
     data = load_api_keys()
@@ -542,6 +543,12 @@ def get_presence_settings() -> dict:
         "presence_quiet_end": _int("presence_quiet_end", 7),
     }
 
+
+
+def save_presence_enabled(enabled: bool) -> None:
+    data = load_api_keys()
+    data["presence_enabled"] = bool(enabled)
+    write_config(data)
 
 
 # ── Main-process watchdog ──────────────────────────────────────────────

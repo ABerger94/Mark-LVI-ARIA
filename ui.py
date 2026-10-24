@@ -6114,6 +6114,7 @@ class MainWindow(QMainWindow):
         self._plaque_tasks     = None
         self.on_run_diagnostics = None  # callable: () -> None — run the diagnostics pass, set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
+        self.on_presence_toggle = None  # callable: (enable: bool) -> None, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
@@ -7575,6 +7576,18 @@ class MainWindow(QMainWindow):
         self._autostart_btn.clicked.connect(self._toggle_autostart)
         lay.addWidget(self._autostart_btn)
 
+        self._presence_btn = QPushButton("◉  PRESENCE: ON")
+        self._presence_btn.setFixedHeight(26)
+        self._presence_btn.setFont(QFont("Courier New", 7))
+        self._presence_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._presence_btn.clicked.connect(self._toggle_presence)
+        lay.addWidget(self._presence_btn)
+        try:
+            from memory.config_manager import get_presence_settings as _gps
+            self._update_presence_btn(bool(_gps()["presence_enabled"]))
+        except Exception:
+            self._update_presence_btn(True)
+
         self._pet_btn = QPushButton("🐾  PET MODE")
         self._pet_btn.setFixedHeight(26)
         self._pet_btn.setFont(QFont("Courier New", 7))
@@ -8467,6 +8480,57 @@ class MainWindow(QMainWindow):
         save_brief_enabled(new_val)
         self._update_brief_btn(new_val)
 
+    def _toggle_presence(self):
+        from memory.config_manager import (get_presence_settings,
+                                           save_presence_enabled)
+        try:
+            current = bool(get_presence_settings()["presence_enabled"])
+        except Exception:
+            current = True   # presence defaults on: a click turns it off
+        new_val = not current
+        save_presence_enabled(new_val)
+        self._update_presence_btn(new_val)
+        cb = getattr(self, "on_presence_toggle", None)
+        if cb:
+            try:
+                cb(new_val)
+            except Exception:
+                pass
+        else:
+            msg = (f"SYS: Presence {'on' if new_val else 'off'} — "
+                   "takes effect on next launch.")
+            try:
+                self.write_log(msg)
+            except Exception:
+                try:
+                    self._log_sig.emit(msg)
+                except Exception:
+                    pass
+
+    def _update_presence_btn(self, enabled: bool):
+        if not hasattr(self, '_presence_btn'):
+            return
+        if enabled:
+            self._presence_btn.setText("◉  PRESENCE: ON")
+            self._presence_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            self._presence_btn.setText("◉  PRESENCE: OFF")
+            self._presence_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                    text-align: left; padding: 0 8px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            """)
+
     # ── Wake word settings ───────────────────────────────────────────────────
 
     def _wake_state(self) -> dict:
@@ -9299,6 +9363,14 @@ class JarvisUI:
     @on_wake_toggle.setter
     def on_wake_toggle(self, cb):
         self._win.on_wake_toggle = cb
+
+    @property
+    def on_presence_toggle(self):
+        return self._win.on_presence_toggle
+
+    @on_presence_toggle.setter
+    def on_presence_toggle(self, cb):
+        self._win.on_presence_toggle = cb
 
     @property
     def on_wake_manual(self):
