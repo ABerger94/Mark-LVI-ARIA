@@ -2802,7 +2802,7 @@ class ConfirmBanner(_HudOverlay):
     tool round trips on every power command."""
 
     answered = pyqtSignal(bool)
-    _OW = 430
+    _OW = 600
 
     def __init__(self, title: str, detail: str, parent=None):
         super().__init__(parent)
@@ -2814,7 +2814,17 @@ class ConfirmBanner(_HudOverlay):
                 border-radius: 6px;
             }}
         """)
-        self.setFixedWidth(self._OW)
+        # Width follows the window: wide enough to actually read in,
+        # never wider than the HUD itself. Height is capped the same
+        # way (see the scroll area below) -- a confirmation the user
+        # cannot fully read is not a confirmation.
+        _pw = parent.width() if parent is not None else 0
+        _ph = parent.height() if parent is not None else 0
+        self.setFixedWidth(max(360, min(self._OW, _pw - 32)) if _pw
+                           else self._OW)
+        if _ph:
+            self.setMaximumHeight(max(240, _ph - 24))
+        self._parent_h = _ph
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 16, 20, 16)
@@ -2825,18 +2835,55 @@ class ConfirmBanner(_HudOverlay):
         hdr.setStyleSheet(f"color: {C.ACC}; background: transparent;")
         lay.addWidget(hdr)
 
+        # Title and detail live in a scroll area. Together they are
+        # the whole text of what is being approved, and none of it
+        # may be cut: the facade used to truncate the detail at 300
+        # characters before it ever reached this banner, and a long
+        # text laid out in full pushed the buttons off the bottom of
+        # the window. Now the text scrolls, the header and buttons
+        # stay put, and every line stays reachable.
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(0, 0, 8, 0)
+        body_lay.setSpacing(8)
+
         ttl = QLabel(title)
         ttl.setWordWrap(True)
         ttl.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
         ttl.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
-        lay.addWidget(ttl)
+        self._title_label = ttl
+        body_lay.addWidget(ttl)
 
+        self._detail_label = None
         if detail:
             dtl = QLabel(detail)
             dtl.setWordWrap(True)
-            dtl.setFont(QFont("Courier New", 8))
-            dtl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
-            lay.addWidget(dtl)
+            dtl.setFont(QFont("Courier New", 10))
+            dtl.setStyleSheet(
+                f"color: {C.TEXT_MED}; background: transparent;")
+            self._detail_label = dtl
+            body_lay.addWidget(dtl)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; }"
+            f"QScrollBar:vertical {{ background: {C.DARK}; width: 9px; "
+            f"margin: 0; border-radius: 4px; }}"
+            f"QScrollBar::handle:vertical {{ background: {C.BORDER_B}; "
+            f"border-radius: 4px; min-height: 30px; }}"
+            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }"
+            "QScrollBar::add-page, QScrollBar::sub-page "
+            "{ background: none; }")
+        scroll.setWidget(body)
+        _cap = (self._parent_h - 150) if self._parent_h else 330
+        scroll.setMaximumHeight(max(60, min(460, _cap)))
+        self._detail_scroll = scroll
+        lay.addWidget(scroll, 1)
 
         row = QHBoxLayout(); row.setSpacing(8)
 
@@ -9310,7 +9357,10 @@ class JarvisUI:
     def show_confirm(self, title: str, detail: str) -> None:
         """Thread-safe: raise the irreversible-action gate. Called from action
         handlers running in executor threads, so it goes through a signal."""
-        self._win._confirm_sig.emit(str(title)[:120], str(detail)[:300])
+        # No truncation here, ever: the banner owns presentation
+        # (wrap + scroll). Slicing the text on its way to the screen
+        # is how a user ends up approving something he could not read.
+        self._win._confirm_sig.emit(str(title), str(detail))
 
     def hide_confirm(self) -> None:
         """Thread-safe: take the gate down."""
