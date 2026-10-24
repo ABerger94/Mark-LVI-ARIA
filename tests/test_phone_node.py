@@ -114,6 +114,20 @@ def test_list_apps_formats_label_and_package(monkeypatch):
     assert stub.calls == [("list_apps", {})]
 
 
+def test_list_apps_not_truncated_at_the_generic_cap(monkeypatch):
+    # Regression (2026-10-24): the phone now reports ALL installed
+    # apps (200-300 packages). The generic 6,000-char list cap cut
+    # that at ~120 apps and the head was presented as the whole list.
+    apps = [{"package": f"com.example.app{i:03d}",
+             "label": f"Example App Number {i:03d}"} for i in range(250)]
+    stub = StubHub(data={"apps": apps})
+    monkeypatch.setattr(node_hub, "HUB", stub)
+    out = tool.phone_list_apps({})
+    assert "Apps on the phone (250):" in out
+    assert "- Example App Number 249 (com.example.app249)" in out
+    assert "[list truncated]" not in out
+
+
 def test_open_app_forwards_args_and_reports(monkeypatch):
     stub = StubHub(data={"package": "com.convoke", "label": "Convoke"})
     monkeypatch.setattr(node_hub, "HUB", stub)

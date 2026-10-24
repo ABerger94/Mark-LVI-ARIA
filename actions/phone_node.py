@@ -55,6 +55,15 @@ NO_NODE = (
 # tail note says it was cut rather than pretending it was whole.
 LIST_LIMIT = 6000
 
+# The app list gets its own, much larger cap (fixed 2026-10-24 at
+# Alek's ask): since the phone node now reports ALL installed apps
+# (200-300 packages on a typical phone, ~50 chars a line), the
+# 6,000-char cap cut the list at roughly 120 apps and ARIA presented
+# the truncated head as if it were the whole phone. 30,000 chars
+# covers a full inventory with headroom; anything beyond it still
+# gets the honest "[list truncated]" tail note.
+APPS_LIST_LIMIT = 30000
+
 _KEY_NAMES = ("back", "home", "recents", "enter")
 
 
@@ -73,9 +82,9 @@ def _send(tool: str, action: str, args: dict):
         return None, outcome.failed(tool, f"the phone command failed: {e}")
 
 
-def _cap(text: str) -> str:
-    if len(text) > LIST_LIMIT:
-        return text[:LIST_LIMIT] + "\n[list truncated]"
+def _cap(text: str, limit: int = LIST_LIMIT) -> str:
+    if len(text) > limit:
+        return text[:limit] + "\n[list truncated]"
     return text
 
 
@@ -115,7 +124,7 @@ def phone_list_apps(parameters: dict = None, player=None,
         return err
     apps = data.get("apps") or []
     if not apps:
-        return "The phone reports no launchable apps."
+        return "The phone reports no installed apps."
     lines = [f"Apps on the phone ({len(apps)}):"]
     for a in apps:
         if not isinstance(a, dict):
@@ -123,7 +132,7 @@ def phone_list_apps(parameters: dict = None, player=None,
         label = str(a.get("label") or "").strip()
         pkg = str(a.get("package") or "").strip()
         lines.append(f"- {label} ({pkg})" if label else f"- {pkg}")
-    return _cap("\n".join(lines))
+    return _cap("\n".join(lines), limit=APPS_LIST_LIMIT)
 
 
 def phone_open_app(parameters: dict = None, player=None,
