@@ -11,19 +11,20 @@ WHAT THIS IS
     own thin actions/phone_<tool>.py beside this one, importing its
     handler from here (the actions.file_controller pattern).
 
-READ vs CONTROL — THE GATE SPLIT
-    Looking is free: status, the app list, the screen, notifications
-    change nothing on the phone and are never gated. Touching is
-    gated: tap, swipe, type and key go through core/confirm.py
-    exactly the way actions/run_shell.py does — pending-banner
-    check, trusted-scope refusal, then confirm.request under the
-    shared key "phone_control". The refusal deserves its reason:
-    a parked tap acts on whatever is on the phone's screen at the
-    moment it lands, and no pre-approved routine step list can
-    describe that screen — so, like a shell command, a phone control
-    is only ever sent as a live call the user confirmed in the
-    moment. Argument validation happens BEFORE the banner (a tap
-    with no target is a plain error, never a confirmation).
+READ vs CONTROL — NO CONFIRMATION GATE (user's call, 2026-10-24)
+    Nothing on the phone is confirmation-gated. Until 2026-10-24,
+    tap, swipe, type and key parked behind a HUD confirmation banner
+    (core/confirm.py, shared key "phone_control") — one banner per
+    step, which broke multi-step phone tasks into a stop-start
+    shuffle. The user removed it, in his words: "I don't need her to
+    ask permission on my phone." Control handlers now validate their
+    arguments and send immediately, so ARIA can chain a whole task —
+    read, tap, read, type, key — without pausing for approval.
+    One refusal survives, and it is not a permission: inside a
+    trusted routine replay a phone control is still refused, because
+    a pre-approved step list cannot describe whatever screen the
+    phone happens to be showing when the replay fires. That refusal
+    is about stale context, not consent — a live call always runs.
 
 SCREEN DISCIPLINE (the descriptions say it to the model too)
     Refs come from phone_read_screen's snapshot and are only valid
@@ -243,16 +244,16 @@ def phone_notifications(parameters: dict = None, player=None,
     return _cap("\n".join(lines))
 
 
-# ── Control side (confirm-gated, key "phone_control") ───────────────────────
+# ── Control side (ungated since 2026-10-24, at the user's word) ────────────
 
-def _gated(tool: str, title: str, detail: str, run) -> str:
-    """The gate, in actions/run_shell.py's exact order: never stack
-    on a waiting banner, never ride a trusted scope, then park."""
-    if confirm.pending_title():
-        return outcome.ask(
-            tool,
-            "there is already a confirmation waiting on screen — the "
-            "user has to answer that one first")
+def _run_control(tool: str, run) -> str:
+    """Run a phone control NOW. No confirmation banner — the user
+    removed the phone_control gate on 2026-10-24 because per-step
+    approval broke multi-step phone tasks. The one surviving check
+    is the trusted-scope refusal: a routine replay fires blind, on
+    whatever screen the phone happens to show, so it is refused
+    rather than run (it is never parked for confirmation either —
+    it simply does not run from a replay)."""
     if confirm.in_trusted_scope():
         return outcome.failed(
             tool,
@@ -261,8 +262,7 @@ def _gated(tool: str, title: str, detail: str, run) -> str:
             "to be on the phone's screen at that moment, which no "
             "pre-approved step list can describe. Ask for it again "
             "as a live call. Nothing was sent to the phone")
-    return confirm.request(key="phone_control", title=title,
-                           detail=detail, run=run)
+    return run()
 
 
 def _int_param(params: dict, key: str):
@@ -295,12 +295,7 @@ def phone_tap(parameters: dict = None, player=None,
         data, err = _send("phone_tap", "tap", args)
         return err if err else f"Tapped {target} on the phone."
 
-    return _gated(
-        "phone_tap", "Tap on the phone",
-        f"Tap: {target}\n"
-        "This acts on whatever app is in front on the user's Android "
-        "phone right now. It is sent only if you press CONFIRM.",
-        _do)
+    return _run_control("phone_tap", _do)
 
 
 def phone_swipe(parameters: dict = None, player=None,
@@ -322,12 +317,7 @@ def phone_swipe(parameters: dict = None, player=None,
         data, err = _send("phone_swipe", "swipe", args)
         return err if err else f"Swiped {path} on the phone."
 
-    return _gated(
-        "phone_swipe", "Swipe on the phone",
-        f"Swipe: {path} over {duration}ms\n"
-        "This acts on whatever app is in front on the user's Android "
-        "phone right now. It is sent only if you press CONFIRM.",
-        _do)
+    return _run_control("phone_swipe", _do)
 
 
 def phone_type(parameters: dict = None, player=None,
@@ -346,13 +336,7 @@ def phone_type(parameters: dict = None, player=None,
         data, err = _send("phone_type", "type", args)
         return err if err else f"Typed {where} on the phone."
 
-    return _gated(
-        "phone_type", "Type on the phone",
-        f"Type {where}: {text!r}\n"
-        "This enters text on the user's Android phone, in whatever "
-        "app is in front right now. It is sent only if you press "
-        "CONFIRM.",
-        _do)
+    return _run_control("phone_type", _do)
 
 
 def phone_key(parameters: dict = None, player=None,
@@ -369,9 +353,4 @@ def phone_key(parameters: dict = None, player=None,
         data, err = _send("phone_key", "key", {"key": key})
         return err if err else f"Pressed {key} on the phone."
 
-    return _gated(
-        "phone_key", "Press a key on the phone",
-        f"Key: {key}\n"
-        "This acts on whatever app is in front on the user's Android "
-        "phone right now. It is sent only if you press CONFIRM.",
-        _do)
+    return _run_control("phone_key", _do)

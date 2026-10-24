@@ -2,12 +2,13 @@
 
 The hub is stubbed at the module attribute the handlers read
 (core.node_hub.HUB), so every test drives the real handler code —
-argument validation, result formatting, the confirm gate — with no
-phone and no socket. The gate tests pin the run_shell discipline:
-validation happens BEFORE the banner, gated tools park through
-confirm.request under the shared key "phone_control" and send
-nothing until the parked callable runs, trusted scopes refuse,
-and the read-side tools never touch the gate at all.
+argument validation, result formatting, control execution — with
+no phone and no socket. Since 2026-10-24 there is NO confirmation
+gate on phone control (the user's word: per-step banners broke
+multi-step tasks): the control tests pin that tap/swipe/type/key
+validate their arguments and then send IMMEDIATELY, that no tool
+ever calls confirm.request, and that a trusted routine replay is
+still refused (stale-context refusal, not a permission).
 """
 import time
 
@@ -46,8 +47,10 @@ def no_node(monkeypatch):
 
 @pytest.fixture
 def confirm_spy(monkeypatch):
-    """confirm.request as a recording double; the parked callable is
-    captured, never run, until a test runs it."""
+    """confirm.request as a recording double. Since the 2026-10-24
+    ungating, NO phone tool may ever call it — tests assert the
+    recording stays empty. Trusted scope defaults to False (a live
+    call), matching production outside a routine replay."""
     calls = []
 
     def request(key, title, detail, run):
@@ -63,9 +66,13 @@ def confirm_spy(monkeypatch):
 
 # ── no node: one plain sentence from every tool ─────────────────────────────
 
-def test_no_node_every_tool_says_so(no_node):
-    gated = [tool.phone_tap, tool.phone_swipe, tool.phone_type,
-             tool.phone_key]
+def test_no_node_every_tool_says_so(no_node, monkeypatch):
+    # Control tools are ungated (2026-10-24): outside a trusted scope
+    # they run immediately, so with no node they reach the hub and
+    # answer with the same plain no-node sentence as the read side.
+    monkeypatch.setattr(confirm, "in_trusted_scope", lambda: False)
+    control = [tool.phone_tap, tool.phone_swipe, tool.phone_type,
+               tool.phone_key]
     plain = [tool.phone_status, tool.phone_list_apps,
              tool.phone_open_app, tool.phone_read_screen,
              tool.phone_notifications]
@@ -74,17 +81,11 @@ def test_no_node_every_tool_says_so(no_node):
         assert out.startswith("No phone node is connected"), fn.__name__
     # phone_status reads nodes(), not send_command — empty is no node.
     assert tool.phone_status({}).startswith("No phone node is connected")
-    # Gated tools park at the gate, whose own machinery answers when
-    # no interface is bound — but with a working gate they must reach
-    # the hub check only after confirmation. Here the gate is the
-    # real one, unbound in tests, so they refuse at the gate.
-    calls_before = len(no_node.calls)  # the read side already called
-    for fn in gated:
+    for fn in control:
         args = {"ref": "1", "x1": 0, "y1": 0, "x2": 1, "y2": 1,
                 "text": "hi", "key": "back"}
         out = fn(args)
-        assert "status=failed" not in out  # refused by the gate, not run
-        assert len(no_node.calls) == calls_before  # nothing new sent
+        assert out.startswith("No phone node is connected"), fn.__name__
 
 
 # ── read side: formatting ───────────────────────────────────────────────────
@@ -184,7 +185,7 @@ def test_hub_failure_renders_as_failed_outcome(monkeypatch):
     assert "did not answer in time" in out
 
 
-# ── control side: the gate ──────────────────────────────────────────────────
+# ── control side: no gate (2026-10-24) ──────────────────────────────────────
 
 @pytest.mark.parametrize("fn,args,action,sent", [
     (tool.phone_tap, {"ref": "7"}, "tap", {"ref": "7"}),
@@ -196,21 +197,18 @@ def test_hub_failure_renders_as_failed_outcome(monkeypatch):
      {"text": "hello", "ref": "2"}),
     (tool.phone_key, {"key": "back"}, "key", {"key": "back"}),
 ])
-def test_gated_tools_park_under_phone_control(monkeypatch, confirm_spy,
-                                               fn, args, action, sent):
+def test_control_tools_run_immediately_without_a_gate(
+        monkeypatch, confirm_spy, fn, args, action, sent):
+    # Regression for the 2026-10-24 ungating: a live tap/swipe/type/
+    # key sends in the SAME call — no banner, no parked callable —
+    # so ARIA can chain multi-step phone tasks without stopping.
     stub = StubHub(data={})
     monkeypatch.setattr(node_hub, "HUB", stub)
 
     out = fn(args)
-    assert out == "[CONFIRMATION_PENDING] test"
-    assert stub.calls == []                      # nothing sent yet
-    (call,) = confirm_spy
-    assert call["key"] == "phone_control"
-
-    # The user pressed CONFIRM: the parked callable does the work.
-    result = call["run"]()
-    assert stub.calls == [(action, sent)]
-    assert "on the phone." in result
+    assert stub.calls == [(action, sent)]   # sent immediately
+    assert "on the phone." in out           # the result, not a park
+    assert confirm_spy == []                # no confirmation asked
 
 
 @pytest.mark.parametrize("fn,args", [
@@ -222,17 +220,21 @@ def test_gated_tools_park_under_phone_control(monkeypatch, confirm_spy,
     (tool.phone_key, {}),
     (tool.phone_key, {"key": "volume_up"}),
 ])
-def test_gated_tools_validate_before_the_banner(monkeypatch, confirm_spy,
-                                                fn, args):
+def test_control_tools_validate_before_sending(monkeypatch, confirm_spy,
+                                               fn, args):
     stub = StubHub(data={})
     monkeypatch.setattr(node_hub, "HUB", stub)
     out = fn(args)
     assert "status=failed" in out
-    assert confirm_spy == []       # no banner for a malformed call
-    assert stub.calls == []
+    assert confirm_spy == []       # a malformed call asks nothing
+    assert stub.calls == []        # ... and sends nothing
 
 
-def test_gated_tools_refuse_inside_a_trusted_scope(monkeypatch, confirm_spy):
+def test_control_tools_refuse_inside_a_trusted_scope(monkeypatch,
+                                                     confirm_spy):
+    # The one surviving refusal: a routine replay fires blind on
+    # whatever screen the phone shows, so it is refused outright —
+    # not parked, not confirmed, not sent.
     stub = StubHub(data={})
     monkeypatch.setattr(node_hub, "HUB", stub)
     monkeypatch.setattr(confirm, "in_trusted_scope", lambda: True)
@@ -243,11 +245,12 @@ def test_gated_tools_refuse_inside_a_trusted_scope(monkeypatch, confirm_spy):
     assert stub.calls == []
 
 
-def test_read_side_never_touches_the_gate(monkeypatch):
+def test_no_phone_tool_ever_calls_confirm_request(monkeypatch):
     def boom(*a, **k):
-        raise AssertionError("read-side tools must not call confirm")
+        raise AssertionError("phone tools must not call confirm.request")
 
     monkeypatch.setattr(confirm, "request", boom)
+    monkeypatch.setattr(confirm, "in_trusted_scope", lambda: False)
     stub = StubHub(data={"apps": [], "nodes": [], "items": []},
                    nodes_list=[])
     monkeypatch.setattr(node_hub, "HUB", stub)
@@ -255,3 +258,8 @@ def test_read_side_never_touches_the_gate(monkeypatch):
     tool.phone_read_screen({})
     tool.phone_notifications({})
     tool.phone_open_app({"label": "Convoke"})
+    # Control side too, now that it is ungated.
+    tool.phone_tap({"ref": "1"})
+    tool.phone_swipe({"x1": 0, "y1": 0, "x2": 1, "y2": 1})
+    tool.phone_type({"text": "hi"})
+    tool.phone_key({"key": "back"})

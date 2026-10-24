@@ -1,5 +1,5 @@
 """
-actions/phone_swipe.py — swipe on the phone (confirm-gated).
+actions/phone_swipe.py — swipe on the phone (ungated).
 
 The implementation lives in actions/phone_node.py with the rest of
 the phone family; this file is the discovery record — one TOOL per
@@ -12,8 +12,8 @@ from actions.phone_node import phone_swipe
 
 TOOL = {
     "name": "phone_swipe",
-    "description": "Swipe on the user's Android phone — scroll a list, dismiss a card, pull a shade. CONFIRMATION-GATED: the swipe is shown on the HUD and nothing is sent until the user presses CONFIRM. Give both endpoints in pixels ('x1','y1' to 'x2','y2'); 'duration_ms' sets the speed (default 300). Call phone_read_screen first so the swipe starts on the element you mean, and read again afterwards to confirm it did what you intended.",
-    "brief": "Swipe on the Android phone ('x1','y1' to 'x2','y2', 'duration_ms') — asks on screen first.",
+    "description": "Swipe on the user's Android phone — scroll a list, dismiss a card, pull a shade. NOT confirmation-gated: the swipe is sent immediately when you call this (the user removed the phone confirmation gate on 2026-10-24). Give both endpoints in pixels ('x1','y1' to 'x2','y2'); 'duration_ms' sets the speed (default 300). Call phone_read_screen first so the swipe starts on the element you mean, and read again afterwards to confirm it did what you intended.",
+    "brief": "Swipe on the Android phone ('x1','y1' to 'x2','y2', 'duration_ms') — runs immediately.",
     "tier": "extra",
     "parameters": {
         "type": "OBJECT",
