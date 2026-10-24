@@ -814,6 +814,14 @@ class JarvisLive:
         self._wake_detector: WakeWordDetector | None = None
         self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
 
+        # ── Presence (v1) ────────────────────────────────────────────────
+        # The presence monitor (core/presence.py) is built and registered
+        # in run() by _start_presence; None until then, and None forever
+        # when presence_enabled is off. Deliberately unrelated to _awake:
+        # presence naps the HUD and pauses proactive speech, it never
+        # gates the mic, typing, or a command.
+        self._presence_monitor = None
+
         # Restore the saved push-to-talk preference. Doing it here rather than
         # in __init__ means the hotkey thread only exists once there is a
         # session to talk to.
@@ -1074,6 +1082,124 @@ class JarvisLive:
                 continue
             if (time.monotonic() - self._last_user_speech) > self._wake_sleep_timeout:
                 self.sleep(reason="no speech for 2 minutes")
+
+    # ── Presence (v1) ────────────────────────────────────────────────────
+    # A visual + proactive-speech layer only (core/presence.py owns the
+    # logic and the hard rules): the HUD naps when Alek steps away and
+    # a plain, time-aware greeting is spoken when a long absence ends.
+    # Nothing here touches _awake, _last_user_speech, sleep()/wake(),
+    # or any command path — presence can never refuse him anything.
+
+    def _presence_media_playing(self) -> bool:
+        """Media veto probe: ARIA speaking, or Spotify reporting
+        playback. Best-effort — any failure reads as not playing."""
+        with self._speaking_lock:
+            if self._is_speaking:
+                return True
+        try:
+            from core import spotify as _spotify
+            return bool(_spotify.now_playing().get("playing"))
+        except Exception:
+            return False
+
+    def _presence_busy(self) -> bool:
+        """Busy veto probe: ARIA speaking, or work in flight — the
+        fleet count (delegated tasks plus in-flight tool calls) is
+        what main already tracks for the HUD. Best-effort."""
+        with self._speaking_lock:
+            if self._is_speaking:
+                return True
+        try:
+            return fleet_core.running_count() > 0
+        except Exception:
+            return False
+
+    def _presence_on_away(self, reason: str) -> None:
+        try:
+            self.ui.write_log(
+                f"SYS: Presence — you stepped away ({reason}); "
+                "I'll keep quiet until you're back.")
+            if not self.ui.muted:
+                self.ui.set_state("SLEEPING")
+        except Exception:
+            pass
+
+    def _presence_on_return(self, away_s: float, greet: bool) -> None:
+        try:
+            self.ui.write_log(
+                f"SYS: Presence — you're back "
+                f"(away {int(away_s // 60)}m).")
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+        except Exception:
+            pass
+        if not greet:
+            return
+        try:
+            from core import presence as _presence
+            now = datetime.now()
+            line = _presence.greeting_for(
+                now.hour, away_s, now.toordinal())
+        except Exception:
+            return
+        # The greeting is always on the record; it is spoken only
+        # when a session is live, through the proactive-speech path
+        # (plugin_say, the _scheduler_say channel) — and never
+        # queued for later if it cannot go out now.
+        try:
+            self.ui.write_log(f"SYS: {line}")
+        except Exception:
+            pass
+        if self.session:
+            self.plugin_say(
+                "Announce this greeting to the user now, in one "
+                "short sentence, in English: " + line)
+
+    def _start_presence(self) -> None:
+        """Build and register the presence monitor (called once in
+        run(), beside the other service bindings). Disabled in
+        config = no monitor, no registration, no loop work."""
+        try:
+            from core import presence as _presence
+            from memory.config_manager import get_presence_settings
+            settings = get_presence_settings()
+            if not settings.get("presence_enabled", True):
+                self.ui.write_log(
+                    "SYS: Presence is off (presence_enabled=false).")
+                return
+            monitor = _presence.PresenceMonitor(
+                idle_signal=_presence.idle_seconds,
+                locked_signal=_presence.locked,
+                media_signal=self._presence_media_playing,
+                busy_probe=self._presence_busy,
+                idle_after_s=settings["presence_idle_seconds"],
+                greet_after_s=settings["presence_greet_after_seconds"],
+                quiet_hours=(settings["presence_quiet_start"],
+                             settings["presence_quiet_end"]),
+                enabled=True,
+                on_away=self._presence_on_away,
+                on_return=self._presence_on_return)
+            _presence.set_monitor(monitor)
+            self._presence_monitor = monitor
+            self.ui.write_log(
+                "SYS: Presence on — I'll nap when you step away "
+                "and say hello when you're back.")
+        except Exception as e:
+            print(f"[Presence] ⚠️ start failed: {e}")
+
+    async def _run_presence_watch(self) -> None:
+        """Presence v1: tick the monitor every 5s. The probes touch
+        the window list and the fleet stores, so the tick runs off
+        the event loop; a failed tick is skipped, never fatal."""
+        while True:
+            await asyncio.sleep(5)
+            monitor = self._presence_monitor
+            if monitor is None:
+                continue
+            try:
+                await asyncio.to_thread(monitor.tick)
+            except Exception:
+                pass
 
     # ── Wake word: UI callbacks (called from the Qt thread) ──────────────────
 
@@ -3254,6 +3380,12 @@ class JarvisLive:
                             run_prompt=self._scheduler_run,
                             briefing=self._scheduler_briefing)
 
+        # Presence (v1): build + register the monitor now so the
+        # scheduler/screenwatch choke points can consult it from
+        # the first tick; the 5s driver task rides the session
+        # TaskGroup beside _run_sleep_watch.
+        self._start_presence()
+
         # Phone notifications (core/notify.py): the say-hook's
         # asleep branch pushes through notify_core.notify, and
         # notify's live-toast sink is the dashboard's broadcast —
@@ -3484,6 +3616,7 @@ class JarvisLive:
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_scheduler())
                     tg.create_task(self._run_sleep_watch())
+                    tg.create_task(self._run_presence_watch())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 

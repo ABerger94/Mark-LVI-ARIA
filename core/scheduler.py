@@ -159,12 +159,21 @@ def _run_prompt(text: str) -> bool:
 
 
 def proactive_alerts_enabled() -> bool:
-    """Config's proactive_alerts flag, read at alert time (Phase
-    G4). An unreadable config defaults to ON — the flag silences
-    her on purpose, never by accident."""
+    """Config's proactive_alerts flag AND the presence layer, read
+    at alert time (Phase G4; presence added in Presence v1). An
+    unreadable config defaults to ON — the flag silences her on
+    purpose, never by accident. Presence is fail-open the same
+    way: only a positively-known absence silences a proactive
+    alert, never a broken probe."""
     try:
         from memory.config_manager import get_proactive_alerts
-        return bool(get_proactive_alerts())
+        if not bool(get_proactive_alerts()):
+            return False
+    except Exception:
+        pass
+    try:
+        from core import presence
+        return bool(presence.is_present())
     except Exception:
         return True
 

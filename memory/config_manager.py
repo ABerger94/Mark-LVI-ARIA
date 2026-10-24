@@ -515,6 +515,34 @@ def save_proactive_alerts(enabled: bool) -> None:
     write_config(data)
 
 
+# ── Presence (v1) ───────────────────────────────────────────────
+# The presence layer's settings (core/presence.py): whether it
+# runs at all, how long without keyboard/mouse input counts as
+# away, how long an absence must be before a return earns a
+# spoken greeting, and the quiet hours a late-night return never
+# greets inside. Config keys only in v1 — no SETUP-drawer toggle
+# yet (a named follow-up). Defaults mirror the spec: on, 10 min
+# idle, greet after 30 min away, quiet 23:00–07:00.
+
+def get_presence_settings() -> dict:
+    data = load_api_keys()
+
+    def _int(key, default):
+        try:
+            return int(data.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "presence_enabled": bool(data.get("presence_enabled", True)),
+        "presence_idle_seconds": _int("presence_idle_seconds", 600),
+        "presence_greet_after_seconds": _int(
+            "presence_greet_after_seconds", 1800),
+        "presence_quiet_start": _int("presence_quiet_start", 23),
+        "presence_quiet_end": _int("presence_quiet_end", 7),
+    }
+
+
 
 # ── Main-process watchdog ──────────────────────────────────────────────
 # Whether the watchdog supervises the two loops (core/watchdog.py):

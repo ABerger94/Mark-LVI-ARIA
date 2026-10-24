@@ -120,6 +120,18 @@ def check_watch(name: str,
     watch = watches.get(name)
     if not watch:
         return f"[No screen watch named '{name}'.]"
+    # Presence v1: while Alek is away, skip the check entirely —
+    # no screenshot, no vision call — and answer exactly like a
+    # no-change check, so the scheduler's bookkeeping is
+    # undisturbed and the last answer stays the baseline for the
+    # first check after he returns. Fail-open: a broken presence
+    # probe never skips a check.
+    try:
+        from core import presence
+        if not presence.is_present():
+            return f"Screen watch '{name}': no change."
+    except Exception:
+        pass
     ask = ask or ask_screen
     question = watch.get("question", "")
     try:
