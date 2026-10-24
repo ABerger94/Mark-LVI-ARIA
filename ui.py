@@ -5241,7 +5241,7 @@ class RemoteKeyOverlay(QWidget):
 # "bot" (the robot character with the OLED face — Alek's pick) and
 # "orb" (her Resonance waveform core, shrunk). Switching is instant:
 # same window, same canvas, different painter.
-from PyQt6.QtGui import QAction, QLinearGradient, QPainterPath
+from PyQt6.QtGui import QLinearGradient, QPainterPath
 from PyQt6.QtWidgets import QMenu
 
 PET_SIZE = (240, 260)          # (width, height) of the pet window

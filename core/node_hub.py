@@ -57,7 +57,7 @@ import concurrent.futures
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 DEFAULT_TIMEOUT = 15.0
