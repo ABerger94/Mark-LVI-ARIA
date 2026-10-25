@@ -145,9 +145,16 @@ def test_organize_real_run_through_the_gate(tmp_path):
     assert (tmp_path / "photo.jpg").exists()  # not yet
 
     confirm.resolve(True)
-    # resolve() runs the work on a worker thread; wait for the moves.
-    for _ in range(100):
-        if (tmp_path / "Images" / "photo.jpg").exists():
+    # resolve() runs the work on a worker thread; wait for the run to
+    # FINISH, not for its first move. The old wait broke on photo.jpg
+    # alone and asserted the rest immediately — on a loaded machine
+    # (CI) the worker was still mid-run and report.pdf wasn't moved
+    # yet: the flake this replaces (~1 in 30 under CPU load, captured
+    # 2026-10-24). The run's own completion signal is its undo push,
+    # which lands after the last move.
+    from core import undo as _undo
+    for _ in range(200):
+        if (tmp_path / "Images" / "photo.jpg").exists() and _undo.can_undo():
             break
         time.sleep(0.05)
     assert (tmp_path / "Images" / "photo.jpg").exists()
