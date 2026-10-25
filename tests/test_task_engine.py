@@ -428,13 +428,18 @@ def test_resume_counts_against_max_active(bound):
         release.wait(timeout=10)
         return inner(messages, decls)
 
+    # Record 50 goes in BEFORE any worker starts: the store's
+    # writers are module-internal (load-modify-save under the
+    # module lock), so an external write while workers are live
+    # can be lost under a worker's checkpoint save — the flake
+    # this ordering removes. delegate() then appends under the
+    # lock and record 50 survives every checkpoint.
+    _write_store(bound["store"],
+                 [_record(id=50, status="blocked_input",
+                          blocked_reason="needs the user")],
+                 next_id=99)
     bound["make"](blocking)
     ids = [dlg.delegate(f"job {i}")[0] for i in range(dlg.MAX_ACTIVE)]
-    _write_store(bound["store"],
-                 json.loads(bound["store"].read_text())["tasks"]
-                 + [_record(id=50, status="blocked_input",
-                            blocked_reason="needs the user")],
-                 next_id=99)
     ok, message = dlg.resume(50)
     assert not ok and "already in flight" in message
     release.set()
