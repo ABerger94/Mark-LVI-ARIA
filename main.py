@@ -48,7 +48,30 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-import sounddevice as sd
+try:
+    import sounddevice as sd
+except Exception as _sd_error:
+    # sounddevice initialises PortAudio AT IMPORT on some builds, and
+    # on a machine with no working audio stack — a CI runner with no
+    # PulseAudio server, a headless box — that raises PortAudioError,
+    # which used to kill `import main` itself and every non-audio
+    # feature and test with it (CI red on every push 2026-10-23→24
+    # while the same suites passed on machines with audio). Degrade
+    # instead: sd becomes a stub that raises this one clear error
+    # only when an audio path is actually used — and the mic/speaker
+    # open sites already treat an open failure as a device problem,
+    # falling back or reporting it, which is what this is.
+    # NB: the text is copied out of the except variable — Python
+    # deletes the `as` name when the block ends, so a stub that read
+    # _sd_error at call time would NameError instead of reporting.
+    _SD_ERROR_TEXT = str(_sd_error)
+
+    class _UnavailableSoundDevice:
+        def __getattr__(self, _name):
+            raise RuntimeError(
+                f"sounddevice unavailable on this machine: {_SD_ERROR_TEXT}")
+
+    sd = _UnavailableSoundDevice()
 import numpy as np
 from google import genai
 from google.genai import types

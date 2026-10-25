@@ -14,7 +14,23 @@ import threading
 from typing import Callable, Optional
 
 import numpy as np
-import sounddevice as sd
+
+try:
+    import sounddevice as sd
+except Exception as _sd_error:
+    # Same degradation as main.py's import: sounddevice can raise
+    # PortAudioError at import on a machine with no working audio
+    # stack, and a TTS module that cannot be imported takes every
+    # caller down with it. The stub raises one clear error only when
+    # a playback function is actually used.
+    _SD_ERROR_TEXT = str(_sd_error)   # the `as` name dies with the block
+
+    class _UnavailableSoundDevice:
+        def __getattr__(self, _name):
+            raise RuntimeError(
+                f"sounddevice unavailable on this machine: {_SD_ERROR_TEXT}")
+
+    sd = _UnavailableSoundDevice()
 
 
 
