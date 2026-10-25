@@ -9,8 +9,11 @@ no offset, so a large file — ui.py is ~7,700 lines — could never be
 read in full through it, which is part of how she came to rewrite
 ui.py blind. This tool reads explicit offset/limit line ranges,
 reports the file's total line count and her running coverage, and
-records that coverage: edit_own_code and patch_own_code refuse any
-file whose current version has not been read in full.
+records that coverage. The gate is two-tier (Alek's ruling,
+2026-10-25): edit_own_code refuses a file whose current version has
+not been read in full, while patch_own_code and
+replace_lines_own_code refuse only when the region being changed —
+the span plus 60 lines around it — has not been read.
 """
 
 from __future__ import annotations
@@ -52,15 +55,19 @@ TOOL = {
         "memory/, providers/, dashboard/ or plugins/, and "
         "core/prompt.txt. Each call returns 'offset'..'offset+limit-1' "
         "numbered lines plus the file's total line count and how much "
-        "of it you have now read. RULE: before edit_own_code or "
-        "patch_own_code will accept a change to a file, you must have "
-        "read that file's CURRENT version in full with this tool — "
-        "the edit tools refuse otherwise and tell you how many lines "
-        "remain. Any change to the file resets the requirement."
+        "of it you have now read. RULE: before you change a file, "
+        "read its CURRENT version with this tool — the whole file "
+        "before a full rewrite with edit_own_code, or at least the "
+        "region you are changing plus its surroundings before "
+        "patch_own_code or replace_lines_own_code. The edit tools "
+        "refuse an unread file or region and name the lines to "
+        "read. Changes made outside the edit tools reset the "
+        "requirement."
     ),
     "brief": (
         "Read one of your own source files in line ranges ('path', "
-        "'offset', 'limit'). Required in full before you may edit it."
+        "'offset', 'limit'). Required before you edit: in full for "
+        "a rewrite, the changed region for a patch or line-replace."
     ),
     "tier": "extra",
     "parameters": {

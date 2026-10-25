@@ -11,8 +11,8 @@ The turn-end watcher itself now lives in core/codewatch.py
 (CodeWatcher, tested in tests/test_codewatch.py); it composes the
 primitives kept in core/selfedit.py. This file pins those halves: the
 tools write only inside the allowlist (which is the watched set), the
-read-before-edit gate refuses until the file has been read in full at
-its current hash, and the validation primitives — compile is not
+two-tier read-before-edit gate refuses edits to files or regions that
+have not been read at their current hash, and the validation primitives — compile is not
 enough, so every changed file is smoke-imported, and a broken file
 is restored from git.
 """
@@ -230,6 +230,11 @@ def test_edit_refused_without_any_read(tree):
 
 
 def test_patch_refused_with_partial_coverage(tree):
+    """The region gate, both directions: a patch whose neighborhood
+    is unread is refused — and the refusal names the unread lines and
+    the exact read that fixes it — while a patch whose neighborhood
+    plus margin HAS been read is allowed with the rest of the file
+    unread."""
     _write(tree, "core/mod.py", "A = 1\nB = 2\nC = 3\n")
     ok, _ = selfedit.read_own_code("core/mod.py", offset=1, limit=2,
                                    root=tree)
@@ -237,8 +242,21 @@ def test_patch_refused_with_partial_coverage(tree):
     ok, msg = selfedit.patch_own_code(
         "core/mod.py", "C = 3", "C = 4", root=tree)
     assert not ok
-    assert "1 of its 3 lines are unread" in msg
+    assert "region lines 3" in msg
+    assert "offset=1" in msg and "limit=3" in msg
     assert "C = 3" in (tree / "core/mod.py").read_text(encoding="utf-8")
+
+    lines = "".join(f"L{n:03d} = {n}\n" for n in range(1, 201))
+    _write(tree, "core/mod.py", lines)
+    # Read ONLY line 130's neighborhood plus the 60-line margin.
+    ok, _ = selfedit.read_own_code("core/mod.py", offset=70, limit=121,
+                                   root=tree)
+    assert ok
+    ok, msg = selfedit.patch_own_code(
+        "core/mod.py", "L130 = 130", "L130 = 131", root=tree)
+    assert ok, msg
+    assert "L130 = 131" in (tree / "core/mod.py").read_text(
+        encoding="utf-8")
 
 
 def test_edit_allowed_after_full_chunked_read(tree):
@@ -261,21 +279,39 @@ def test_gate_resets_when_file_changes_after_read(tree):
         encoding="utf-8")                            # untouched
 
 
-def test_gate_resets_after_her_own_successful_edit(tree):
+def test_her_own_patch_carries_coverage(tree):
+    """The carry-over contract (2026-10-25): a patch she makes
+    through this module keeps coverage alive at the new hash — the
+    new version's content is known exactly because she authored the
+    change — so a second patch in the same region succeeds with NO
+    re-read. An OUTSIDE change still resets everything; that half
+    stays pinned by test_gate_resets_when_file_changes_after_read."""
     _read_fully(tree, "core/mod.py")
     ok, _ = selfedit.patch_own_code(
         "core/mod.py", "VALUE = 1", "VALUE = 2", root=tree)
     assert ok
-    # Her edit changed the file: the next edit needs a fresh read of
-    # the new version, not goodwill toward the old one.
     ok, msg = selfedit.patch_own_code(
         "core/mod.py", "VALUE = 2", "VALUE = 3", root=tree)
-    assert not ok
-    assert "not read" in msg
+    assert ok, msg
+    assert "VALUE = 3" in (tree / "core/mod.py").read_text(
+        encoding="utf-8")
+
+
+def test_patch_after_successful_rewrite_needs_no_reread(tree):
+    """Authored coverage for the rewrite tier: after her own
+    edit_own_code rewrite, every line of the new version counts as
+    read, so a patch lands with no re-read. (edit_own_code itself
+    still refuses a partial read — the full-tier gate is unchanged,
+    pinned by test_edit_refused_without_any_read.)"""
     _read_fully(tree, "core/mod.py")
-    ok, _ = selfedit.patch_own_code(
-        "core/mod.py", "VALUE = 2", "VALUE = 3", root=tree)
+    ok, _ = selfedit.edit_own_code(
+        "core/mod.py", "VALUE = 10\nOTHER = 20\n", root=tree)
     assert ok
+    ok, msg = selfedit.patch_own_code(
+        "core/mod.py", "VALUE = 10", "VALUE = 11", root=tree)
+    assert ok, msg
+    assert "VALUE = 11" in (tree / "core/mod.py").read_text(
+        encoding="utf-8")
 
 
 def test_read_own_code_reports_ranges_and_total(tree):
@@ -306,3 +342,92 @@ def test_note_read_text_counts_only_received_lines(tree):
     ok, _ = selfedit.patch_own_code(
         "core/mod.py", "C = 3", "C = 4", root=tree)
     assert ok
+
+
+# ── replace_lines_own_code ──────────────────────────────────────────────────
+
+def _numbered(tree: Path, n: int = 200) -> None:
+    _write(tree, "core/mod.py",
+           "".join(f"L{i:03d} = {i}\n" for i in range(1, n + 1)))
+
+
+def test_replace_lines_after_region_only_read(tree):
+    _numbered(tree)
+    ok, _ = selfedit.read_own_code("core/mod.py", offset=40, limit=123,
+                                   root=tree)
+    assert ok   # lines 40–162 read; the rest of the file is unread
+    ok, msg = selfedit.replace_lines_own_code(
+        "core/mod.py", 100, 102, "X = 1\nY = 2", root=tree)
+    assert ok, msg
+    lines = (tree / "core/mod.py").read_text(
+        encoding="utf-8").splitlines()
+    assert len(lines) == 199
+    assert lines[99] == "X = 1" and lines[100] == "Y = 2"
+    assert lines[101] == "L103 = 103"
+    assert "post-turn restart check" in msg
+
+
+def test_replace_lines_refused_without_any_read(tree):
+    _write(tree, "core/mod.py", "A = 1\nB = 2\nC = 3\n")
+    ok, msg = selfedit.replace_lines_own_code(
+        "core/mod.py", 2, 2, "B = 20", root=tree)
+    assert not ok
+    # The refusal names the unread region lines (span ± margin,
+    # clamped to the file).
+    assert "region lines 1–3" in msg
+    assert "B = 2" in (tree / "core/mod.py").read_text(
+        encoding="utf-8")                    # untouched
+
+
+def test_replace_lines_out_of_range_refusals(tree):
+    _write(tree, "core/mod.py", "A = 1\nB = 2\nC = 3\n")
+    ok, msg = selfedit.replace_lines_own_code(
+        "core/mod.py", 2, 9, "B = 20", root=tree)
+    assert not ok
+    assert "has 3 lines" in msg   # names the file's actual line count
+    ok, msg = selfedit.replace_lines_own_code(
+        "core/mod.py", 0, 1, "B = 20", root=tree)
+    assert not ok
+    assert "out of range" in msg
+    assert (tree / "core/mod.py").read_text(
+        encoding="utf-8") == "A = 1\nB = 2\nC = 3\n"   # untouched
+
+
+def test_replace_lines_span_cap_refusal(tree):
+    _numbered(tree, 500)
+    ok, msg = selfedit.replace_lines_own_code(
+        "core/mod.py", 1, 401, "X = 1", root=tree)
+    assert not ok
+    assert "at most 400" in msg
+    assert "L401 = 401" in (tree / "core/mod.py").read_text(
+        encoding="utf-8")                    # untouched
+
+
+def test_replace_lines_empty_text_deletes_span(tree):
+    _write(tree, "core/mod.py", "A = 1\nB = 2\nC = 3\n")
+    _read_fully(tree, "core/mod.py")
+    ok, msg = selfedit.replace_lines_own_code(
+        "core/mod.py", 2, 2, "", root=tree)
+    assert ok, msg
+    assert (tree / "core/mod.py").read_text(
+        encoding="utf-8") == "A = 1\nC = 3\n"
+
+
+def test_replace_lines_insertion_shifts_coverage(tree):
+    """Insert lines ABOVE a read region: coverage carries over and
+    shifts with the content, so a patch inside the shifted region
+    still passes the gate with no re-read."""
+    _numbered(tree)
+    ok, _ = selfedit.read_own_code("core/mod.py", offset=1, limit=190,
+                                   root=tree)
+    assert ok   # lines 1–190 covered at this hash
+    ok, msg = selfedit.replace_lines_own_code(
+        "core/mod.py", 10, 10,
+        "N1 = 0\nN2 = 0\nN3 = 0\nN4 = 0\nN5 = 0", root=tree)
+    assert ok, msg   # 1 line becomes 5: everything below shifts +4
+    lines = (tree / "core/mod.py").read_text(
+        encoding="utf-8").splitlines()
+    assert lines[123] == "L120 = 120"   # was line 120, now line 124
+    ok, msg = selfedit.patch_own_code(
+        "core/mod.py", "L120 = 120", "L120 = 121", root=tree)
+    assert ok, msg

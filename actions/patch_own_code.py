@@ -51,7 +51,10 @@ TOOL = {
         "matches none or several, nothing is changed and you are told "
         "why. The change is validated after this turn (compile + import "
         "smoke test): good changes are announced and loaded by restart, "
-        "broken ones are restored from git and reported."
+        "broken ones are restored from git and reported. Read rule: "
+        "only the region being changed (the passage plus its "
+        "surroundings) must have been read with read_own_code at the "
+        "file's current version — not the whole file."
     ),
     "brief": (
         "Patch one exact passage in one of your own files ('path', "

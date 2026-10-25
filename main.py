@@ -959,6 +959,7 @@ class JarvisLive:
     _DELEGATED_EXCLUDE = frozenset({
         "delegate_task", "shutdown_jarvis", "restart_program",
         "run_routine", "edit_own_code", "patch_own_code",
+        "replace_lines_own_code",
         "run_shell_command", "notify_phone", "update_status",
         "task_resume", "task_cancel",
     })

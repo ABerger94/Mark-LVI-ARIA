@@ -48,6 +48,7 @@ EXAMPLE_PHRASES = {
     "spotify":           "What's playing on Spotify?",
     "edit_own_code":     "Rewrite your startup greeting",
     "patch_own_code":    "Fix that bug in your own code",
+    "replace_lines_own_code": "Replace those lines in your own code",
     "routine_record_start": "Watch me do this and save it as a routine",
     "routine_record_stop":  "Stop recording and save that routine",
     "run_routine":          "Run my morning setup routine",

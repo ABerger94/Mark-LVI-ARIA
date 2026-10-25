@@ -5,7 +5,8 @@ validated before it is allowed to be true.
 THE SHAPE OF THE THING (ported from ARIA's brain.py + tools/selfedit.py,
 2026-10-21 fix package — the flow Alek watched work)
 
-    Two tools (actions/edit_own_code.py, actions/patch_own_code.py) write
+    Three tools (actions/edit_own_code.py, actions/patch_own_code.py,
+    actions/replace_lines_own_code.py) write
     to an allowlist that is EXACTLY the watched set below. The tools
     themselves validate nothing and restart nothing. After each turn, the
     watcher re-hashes the watched set; anything that changed — through
@@ -53,22 +54,49 @@ READ BEFORE EDIT, IMPORT BEFORE RESTART (Alek's rules, 2026-10-22)
 
     Two rules, both enforced here rather than merely taught:
 
-    READ A FILE FULLY BEFORE EDITING IT. read_own_code() reads a
-    watched file in explicit line ranges and records coverage —
-    per file, keyed to the file's current sha256, the union of
-    ranges read this process. edit_own_code and patch_own_code
-    REFUSE until coverage at the file's current hash covers every
-    line, and the refusal says how many lines remain unread. Any
-    change to the file (hers, or anyone's) changes the hash and
-    resets the requirement: she re-reads the version she is about
-    to edit, never an ancestor of it. Coverage lives in-process
-    (session) only — a restart means re-reading before the next
-    edit, which is the point. The rule exists because the general
-    read_file truncates at 4,000 chars with no offset: through it,
-    a file like ui.py (~7,700 lines) could never be read in full,
-    so she rewrote it blind. Lines received through read_file DO
-    count toward coverage (file_controller notes them, truncation
-    respected); read_own_code is how she finishes the job.
+    READ BEFORE EDITING — TWO TIERS (Alek's rules, 2026-10-22;
+    region scope added by his ruling, 2026-10-25). read_own_code()
+    reads a watched file in explicit line ranges and records
+    coverage — per file, keyed to the file's current sha256, the
+    union of ranges read this process. What the gate requires
+    depends on the edit:
+
+    A FULL REWRITE (edit_own_code) requires coverage of every
+    line at the current hash: a rewrite re-emits the whole file,
+    so the whole file must have been read. The rule exists
+    because the general read_file truncates at 4,000 chars with
+    no offset: through it, a file like ui.py (~7,700 lines)
+    could never be read in full, so she rewrote it blind. Lines
+    received through read_file DO count toward coverage
+    (file_controller notes them, truncation respected);
+    read_own_code is how she finishes the job.
+
+    A PATCH OR LINE-REPLACE (patch_own_code,
+    replace_lines_own_code) requires only the region being
+    changed plus _PATCH_CONTEXT_LINES (60) on each side. The
+    full-file rule made a one-line fix to ui.py (9,727 lines)
+    cost 5–25 read calls first; the intent — she must have read
+    what she is about to change, at the version she is about to
+    change it in — is preserved at region scope. Region scope
+    is safe because a patch is anchored to exact text found
+    inside the read region and a replace names explicit line
+    numbers inside it; neither can touch a line beyond the
+    region and its margin. The refusal names the exact unread
+    lines and the read that fixes it.
+
+    COVERAGE CARRY-OVER. The hash binding exists so she never
+    edits a version she hasn't read. When THIS module performs
+    a successful patch, replace or rewrite, the new version's
+    content is known exactly, so coverage translates to the new
+    hash instead of resetting: lines before the change keep
+    their numbers, the changed lines are covered (she authored
+    them), lines after shift by the size change, and a rewrite
+    covers every line. A change made ANYWHERE ELSE — her
+    general file tools, the user, git — changes the hash with
+    no carry-over and resets the requirement: she re-reads the
+    version she is about to edit, never an ancestor of it.
+    Coverage lives in-process (session) only — a restart means
+    re-reading before the next edit, which is the point.
 
     IMPORT-CHECK EVERY CHANGED FILE. Every watched .py — root
     scripts included — is smoke-imported in a subprocess before a
@@ -125,6 +153,14 @@ _RESTART_NOTE = (
 # The action wrappers surface the same note to the model as a fact.
 RESTART_NOTE = _RESTART_NOTE.strip()
 
+# How much read context a patch/replace must have around the lines it
+# changes (Alek's ruling, 2026-10-25): the region gate covers the
+# changed span plus this many lines on each side.
+_PATCH_CONTEXT_LINES = 60
+# The largest span one replace_lines_own_code call may rewrite —
+# larger changes split into smaller replaces.
+_MAX_REPLACE_SPAN = 400
+
 
 # ── The watched set ─────────────────────────────────────────────────────────
 
@@ -166,10 +202,11 @@ def snapshot_hashes(root: Optional[Path] = None) -> Dict[str, Optional[str]]:
 #
 # The registry the gate consults: per file, the union of line ranges read
 # at the file's CURRENT sha256. Hash binding is the honesty — coverage
-# recorded against any other bytes counts for nothing, so an edit (hers
-# included) or an outside change resets the requirement to read the new
-# version. In-process only; see the module header for why that is a
-# feature. All functions here never raise into a read or an edit.
+# recorded against any other bytes counts for nothing, so an outside
+# change resets the requirement to read the new version; an edit made
+# through THIS module carries its coverage over instead (see
+# _carry_coverage). In-process only; see the module header for why that
+# is a feature. All functions here never raise into a read or an edit.
 
 _coverage_lock = threading.Lock()
 _coverage: Dict[str, Tuple[str, set]] = {}   # abspath -> (sha256, {lines})
@@ -237,6 +274,109 @@ def _unread_lines(path: str) -> Optional[Tuple[int, int]]:
         covered = entry[1] if entry and entry[0] == sha else set()
     unread = sum(1 for n in range(1, total + 1) if n not in covered)
     return total, unread
+
+
+def _covered_lines(path: str) -> set:
+    """The lines of the file at `path` covered at its CURRENT hash —
+    empty when nothing is covered at this version."""
+    sha = _file_sha256(path)
+    with _coverage_lock:
+        entry = _coverage.get(path)
+        if entry and entry[0] == sha:
+            return set(entry[1])
+    return set()
+
+
+def _region_gate_refusal(target: str, root: Optional[Path],
+                         first: int, last: int) -> Optional[str]:
+    """The region gate for patch/replace: a refusal when any line of
+    [first, last] — the changed span plus _PATCH_CONTEXT_LINES on
+    each side, clamped to the file by the caller — is uncovered at
+    the file's CURRENT hash, else None. The refusal names the exact
+    unread lines inside the region and the one read_own_code call
+    that covers the region."""
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            total = _line_count(f.read())
+    except Exception:
+        return None   # unreadable: the edit's own I/O fails honestly
+    covered = _covered_lines(target)
+    unread = [n for n in range(first, last + 1) if n not in covered]
+    if not unread:
+        return None
+    ranges = []
+    run_start = prev = unread[0]
+    for n in unread[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        ranges.append((run_start, prev))
+        run_start = prev = n
+    ranges.append((run_start, prev))
+    named = ", ".join(f"{a}–{b}" if a != b else str(a)
+                      for a, b in ranges)
+    return (f"Self-edit refused: you have not read the region you "
+            f"are changing in {_rel(target, root)} at its current "
+            f"version — {len(unread)} of its {total} lines are "
+            f"unread, including region lines {named}. The whole "
+            f"file is no longer required for patch_own_code or "
+            f"replace_lines_own_code — only the region being "
+            f"changed and {_PATCH_CONTEXT_LINES} lines of context "
+            f"around it — but that region must be read first: "
+            f"read_own_code with offset={first}, "
+            f"limit={last - first + 1}. (A full rewrite with "
+            f"edit_own_code still requires the whole file.)")
+
+
+def _carry_coverage(path: str, pre_sha: Optional[str], old_first: int,
+                    old_last: int, new_span_lines: int) -> None:
+    """Translate read coverage across an edit THIS module just made.
+
+    The edit replaced old lines [old_first, old_last] with
+    `new_span_lines` new lines. The new content is known exactly
+    (this module wrote it), so coverage recorded at the pre-edit
+    hash becomes coverage at the post-edit hash: lines before the
+    span keep their numbers, the new span is covered (she authored
+    it), lines after the span shift by the size change. Runs only
+    when a coverage entry existed at the pre-edit hash; never
+    invents coverage. Never raises."""
+    try:
+        if not pre_sha:
+            return
+        new_sha = _file_sha256(path)
+        if new_sha is None:
+            return
+        delta = new_span_lines - (old_last - old_first + 1)
+        with _coverage_lock:
+            entry = _coverage.get(path)
+            if entry is None or entry[0] != pre_sha:
+                return
+            moved = set()
+            for n in entry[1]:
+                if n < old_first:
+                    moved.add(n)
+                elif n > old_last:
+                    moved.add(n + delta)
+            moved.update(range(old_first,
+                               old_first + new_span_lines))
+            _coverage[path] = (new_sha, moved)
+    except Exception:
+        pass
+
+
+def _cover_all_lines(path: str, total: int) -> None:
+    """Record full coverage of the file at its CURRENT hash — used
+    after a successful edit_own_code rewrite or creation: she
+    authored every line of the new version, so every line of it
+    counts as read. Never raises."""
+    try:
+        sha = _file_sha256(path)
+        if sha is None:
+            return
+        with _coverage_lock:
+            _coverage[path] = (sha, set(range(1, total + 1)))
+    except Exception:
+        pass
 
 
 def _read_gate_refusal(target: str, root: Optional[Path]) -> Optional[str]:
@@ -371,6 +511,7 @@ def edit_own_code(path: str, content: str,
         _atomic_write(target, content or "")
     except Exception as e:
         return False, f"Self-edit failed: {type(e).__name__}: {e}"
+    _cover_all_lines(target, _line_count(content or ""))
     print(f"[SelfEdit] rewrote {_rel(target, root)} "
           f"({len(content or '')} chars)")
     return True, (f"Rewrote {_rel(target, root)} "
@@ -382,13 +523,13 @@ def patch_own_code(path: str, old_text: str, new_text: str,
     """Replace exactly one exact-match occurrence in one of her own
     source files. Refuses when old_text is absent or matches more than
     one place — a partial or ambiguous self-patch is how a working file
-    becomes a broken one. (ARIA's semantics, verbatim.)"""
+    becomes a broken one. (ARIA's semantics, verbatim.) The read gate
+    is region-scoped (Alek's ruling, 2026-10-25): the match's lines
+    plus _PATCH_CONTEXT_LINES around them must have been read at the
+    current version — not the whole file."""
     target, refusal = _resolve_target(path, root)
     if refusal:
         return False, f"Self-edit refused: {refusal}."
-    gate = _read_gate_refusal(target, root)
-    if gate:
-        return False, gate
     if not old_text:
         return False, "Self-edit failed: old_text is empty — nothing to match."
     try:
@@ -407,14 +548,94 @@ def patch_own_code(path: str, old_text: str, new_text: str,
         return False, (f"Self-edit failed: old_text matches {n} places in "
                        f"{_rel(target, root)} — include more surrounding "
                        f"context so it matches exactly one. No change made.")
+    start = current.find(old_text)
+    first = current.count("\n", 0, start) + 1
+    last = first + _line_count(old_text) - 1
+    total = _line_count(current)
+    gate = _region_gate_refusal(
+        target, root, max(1, first - _PATCH_CONTEXT_LINES),
+        min(total, last + _PATCH_CONTEXT_LINES))
+    if gate:
+        return False, gate
+    pre_sha = _file_sha256(target)
     try:
         _atomic_write(target, current.replace(old_text, new_text, 1))
     except Exception as e:
         return False, f"Self-edit failed: {type(e).__name__}: {e}"
+    _carry_coverage(target, pre_sha, first, last,
+                    _line_count(new_text or ""))
     print(f"[SelfEdit] patched {_rel(target, root)} "
           f"({len(old_text)} -> {len(new_text or '')} chars)")
     return True, (f"Patched {_rel(target, root)}: replaced {len(old_text)} "
                   f"characters with {len(new_text or '')}." + _RESTART_NOTE)
+
+
+def replace_lines_own_code(path: str, start_line: int, end_line: int,
+                           new_text: str,
+                           root: Optional[Path] = None) -> Tuple[bool, str]:
+    """Replace lines [start_line, end_line] (1-based, inclusive) of
+    one of her own source files with `new_text` — the line-addressed
+    counterpart to patch_own_code's exact-text anchor, for edits
+    where reproducing the old text byte-exactly is the fragile part
+    (Alek's ruling, 2026-10-25). An empty new_text deletes the span.
+    Region-gated exactly like patch: the span plus
+    _PATCH_CONTEXT_LINES around it must have been read at the
+    current version."""
+    target, refusal = _resolve_target(path, root)
+    if refusal:
+        return False, f"Self-edit refused: {refusal}."
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            current = f.read()
+    except FileNotFoundError:
+        return False, (f"Self-edit failed: {_rel(target, root)} does not "
+                       f"exist — use edit_own_code to create it.")
+    except Exception as e:
+        return False, f"Self-edit failed: {type(e).__name__}: {e}"
+    lines = current.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()   # a trailing newline ends the last line
+    total = len(lines)
+    try:
+        start = int(start_line)
+        end = int(end_line)
+    except (TypeError, ValueError):
+        return False, ("Self-edit failed: start_line and end_line "
+                       "must be whole line numbers.")
+    if start < 1 or end < start or end > total:
+        return False, (f"Self-edit failed: lines {start}–{end} are "
+                       f"out of range — {_rel(target, root)} has "
+                       f"{total} lines. No change made.")
+    span = end - start + 1
+    if span > _MAX_REPLACE_SPAN:
+        return False, (f"Self-edit refused: that span is {span} "
+                       f"lines — one replace may change at most "
+                       f"{_MAX_REPLACE_SPAN}. Split the change into "
+                       f"smaller replaces. No change made.")
+    gate = _region_gate_refusal(
+        target, root, max(1, start - _PATCH_CONTEXT_LINES),
+        min(total, end + _PATCH_CONTEXT_LINES))
+    if gate:
+        return False, gate
+    if new_text:
+        new_lines = new_text.split("\n")
+        if new_text.endswith("\n"):
+            new_lines.pop()   # a trailing newline ends the last new line
+    else:
+        new_lines = []
+    trailing = "\n" if current.endswith("\n") else ""
+    pre_sha = _file_sha256(target)
+    try:
+        _atomic_write(target, "\n".join(
+            lines[:start - 1] + new_lines + lines[end:]) + trailing)
+    except Exception as e:
+        return False, f"Self-edit failed: {type(e).__name__}: {e}"
+    _carry_coverage(target, pre_sha, start, end, len(new_lines))
+    print(f"[SelfEdit] replaced lines {start}–{end} of "
+          f"{_rel(target, root)} ({span} -> {len(new_lines)} lines)")
+    return True, (f"Replaced lines {start}–{end} of "
+                  f"{_rel(target, root)} ({span} lines) with "
+                  f"{len(new_lines)} new lines." + _RESTART_NOTE)
 
 
 # ── Validation (ARIA's compile + smoke-import, adapted) ────────────────────
