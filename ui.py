@@ -6112,6 +6112,9 @@ class MainWindow(QMainWindow):
     _wake_btns_sig   = pyqtSignal()          # wake state resolved off-thread
     _video_close_sig = pyqtSignal()
     _video_mute_sig  = pyqtSignal(bool)
+    _video_seek_sig  = pyqtSignal(int)         # seek target, ms
+    _video_transport_sig = pyqtSignal(str)     # play | pause | toggle
+    _video_volume_sig = pyqtSignal(int)        # video volume, 0-100
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
@@ -6239,6 +6242,13 @@ class MainWindow(QMainWindow):
         # called from plugin threads, and reading a widget's state from one is
         # not something to rely on; an attribute is.
         self._video_on = False
+        # Cached on the Qt thread from the player's own signals, so
+        # other threads read plain ints, never the widget (the same
+        # reasoning as _video_on above). Media control reads these.
+        self._video_position_ms = 0
+        self._video_duration_ms = 0
+        self._video_playing_cached = False
+        self._video_volume_cached = 100
         self._video_cont = QWidget()
         self._video_cont.setStyleSheet(f"background: {C.BG};")
         _vid_v = QVBoxLayout(self._video_cont)
@@ -6310,6 +6320,10 @@ class MainWindow(QMainWindow):
             self._video_item.nativeSizeChanged.connect(self._fit_video)
             self._video_player.setAudioOutput(self._video_audio)
             self._video_player.errorOccurred.connect(self._on_video_error)
+            self._video_player.positionChanged.connect(self._on_video_position)
+            self._video_player.durationChanged.connect(self._on_video_duration)
+            self._video_player.playbackStateChanged.connect(
+                self._on_video_playback_state)
 
             # A SECOND player, for sound that arrives separately.
             #
@@ -6408,6 +6422,9 @@ class MainWindow(QMainWindow):
         self._video_open_sig.connect(self._on_video_open)
         self._video_close_sig.connect(self._on_video_close)
         self._video_mute_sig.connect(self._on_video_mute)
+        self._video_seek_sig.connect(self._on_video_seek)
+        self._video_transport_sig.connect(self._on_video_transport)
+        self._video_volume_sig.connect(self._on_video_volume)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
         self._quiz_sig.connect(self._show_quiz)
@@ -6537,6 +6554,8 @@ class MainWindow(QMainWindow):
         self._video_split = bool(audio_source)
         self._set_video_muted(bool(muted))
 
+        self._video_position_ms = 0
+        self._video_duration_ms = 0
         url = (QUrl.fromLocalFile(source) if Path(source).exists()
                else QUrl(source))
         self._video_player.setSource(url)
@@ -6579,6 +6598,9 @@ class MainWindow(QMainWindow):
                 p.setSource(QUrl())
         self._video_split = False
         self._video_on = False
+        self._video_position_ms = 0
+        self._video_duration_ms = 0
+        self._video_playing_cached = False
         self._hud_cam_stack.setCurrentIndex(0)
         self._sync_mic_for_video()      # gives the microphone back
 
@@ -6660,6 +6682,97 @@ class MainWindow(QMainWindow):
             pass
         self.write_log(f"SYS: The video could not be played{(' — ' + err) if err else ''}.")
         self._on_video_close()
+
+    # --- Media control (position / seek / transport / volume) ---------------
+    #
+    # Everything in this block runs on the Qt thread except the plain
+    # method wrappers at the end, which only emit a signal or read a
+    # cached int — the shape every other video entry point here uses.
+    def _on_video_position(self, position_ms: int) -> None:
+        self._video_position_ms = int(position_ms or 0)
+
+    def _on_video_duration(self, duration_ms: int) -> None:
+        self._video_duration_ms = int(duration_ms or 0)
+
+    def _on_video_playback_state(self, *_a) -> None:
+        try:
+            self._video_playing_cached = bool(
+                self._video_player
+                and self._video_player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState)
+        except Exception:
+            pass
+
+    def _on_video_seek(self, position_ms: int) -> None:
+        """Move the picture — and the split soundtrack with it, so a
+        seek cannot leave the two streams a film apart. The drift
+        timer (_sync_video_sound) keeps mopping up afterwards, as
+        it does for ordinary playback drift."""
+        if not self._video_player:
+            return
+        target = max(0, int(position_ms))
+        try:
+            self._video_player.setPosition(target)
+            if self._video_split and self._video_sound:
+                self._video_sound.setPosition(target)
+            self._video_position_ms = target
+        except Exception:
+            pass
+
+    def _on_video_transport(self, action: str) -> None:
+        if not self._video_player:
+            return
+        try:
+            playing = (self._video_player.playbackState()
+                       == QMediaPlayer.PlaybackState.PlayingState)
+            want_play = (not playing) if action == "toggle" \
+                else action == "play"
+            for p in (self._video_player,
+                      self._video_sound if self._video_split else None):
+                if p is None:
+                    continue
+                p.play() if want_play else p.pause()
+            self._video_playing_cached = want_play
+        except Exception:
+            pass
+
+    def _on_video_volume(self, level: int) -> None:
+        level = max(0, min(100, int(level)))
+        self._video_volume_cached = level
+        for out in (self._video_audio, self._video_sound_out):
+            if out:
+                try:
+                    out.setVolume(level / 100.0)
+                    if level > 0:
+                        out.setMuted(False)
+                except Exception:
+                    pass
+        self._sync_video_mute_btn()
+        self._sync_mic_for_video()
+
+    def seek_video(self, position_ms: int) -> None:
+        self._video_seek_sig.emit(int(position_ms))
+
+    def video_position_ms(self) -> int:
+        return int(self._video_position_ms)
+
+    def video_duration_ms(self) -> int:
+        return int(self._video_duration_ms)
+
+    def video_playback_playing(self) -> bool:
+        return bool(self._video_playing_cached)
+
+    def video_set_playing(self, playing: bool) -> None:
+        self._video_transport_sig.emit("play" if playing else "pause")
+
+    def video_toggle_playback(self) -> None:
+        self._video_transport_sig.emit("toggle")
+
+    def video_volume(self) -> int:
+        return int(self._video_volume_cached)
+
+    def set_video_volume(self, level: int) -> None:
+        self._video_volume_sig.emit(max(0, min(100, int(level))))
 
     def stop_video(self) -> None:
         self._video_close_sig.emit()
@@ -9566,6 +9679,31 @@ class JarvisUI:
     def set_video_muted(self, muted: bool) -> None:
         """Thread-safe: silence or unsilence whatever is playing."""
         self._win._video_mute_sig.emit(bool(muted))
+
+    def seek_video(self, position_ms: int) -> None:
+        """Thread-safe: move the video to a position, in ms."""
+        self._win.seek_video(position_ms)
+
+    def video_position_ms(self) -> int:
+        return int(self._win.video_position_ms())
+
+    def video_duration_ms(self) -> int:
+        return int(self._win.video_duration_ms())
+
+    def video_playback_playing(self) -> bool:
+        return bool(self._win.video_playback_playing())
+
+    def video_set_playing(self, playing: bool) -> None:
+        self._win.video_set_playing(playing)
+
+    def video_toggle_playback(self) -> None:
+        self._win.video_toggle_playback()
+
+    def video_volume(self) -> int:
+        return int(self._win.video_volume())
+
+    def set_video_volume(self, level: int) -> None:
+        self._win.set_video_volume(level)
 
     def video_is_playing(self) -> bool:
         return bool(self._win.video_is_playing())

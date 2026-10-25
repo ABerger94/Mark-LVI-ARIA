@@ -195,6 +195,55 @@ def video_player(parameters: dict = None, response=None, player=None,
         player.set_video_muted(muted)
         return "Muted the video." if muted else "Turned the video's sound on."
 
+    # ---- position + seek ---------------------------------------------------
+    # The same maths as the media_control tool, through the same core
+    # module (core/mediacontrol) — this surface exists so a "skip to
+    # halfway" aimed at the HUD video lands even when the model
+    # reaches for the video tool instead of the media one. Reports
+    # are composed from the position re-read after the seek, never
+    # from the requested target.
+    if action in ("position", "seek_percent", "seek_to", "seek_by",
+                  "pause", "play_pause") or (action == "play"
+                                             and not source):
+        from core import mediacontrol as _mc
+        if not player.video_is_playing():
+            return "Nothing is playing."
+        if action == "position":
+            state = _mc.hud_state(player)
+            phrase = _mc.position_phrase(state["position_s"],
+                                          state["duration_s"])
+            return (f"We're at {phrase} in the video."
+                    if phrase else
+                    "The video's position is not readable yet.")
+        if action in ("play", "pause", "play_pause"):
+            if action == "play_pause":
+                state = _mc.hud_toggle(player)
+            else:
+                state = _mc.hud_set_playing(player, action == "play")
+            return "Playing the video." if state["playing"] \
+                else "Paused the video."
+        state = _mc.hud_state(player)
+        try:
+            target = _mc.resolve_seek_target(
+                action, position_s=state["position_s"],
+                duration_s=state["duration_s"],
+                percent=params.get("percent"),
+                timecode=params.get("timecode"),
+                seconds=params.get("seconds"))
+        except ValueError as e:
+            return str(e)
+        if not hasattr(player, "seek_video"):
+            return "This player cannot seek."
+        after = _mc.hud_seek(player, target)
+        phrase = _mc.position_phrase(after["position_s"],
+                                      after["duration_s"])
+        pct = _mc.percent_of(after["position_s"], after["duration_s"])
+        if phrase and pct is not None and 48 <= pct <= 52:
+            return f"Skipped to {phrase}, about halfway."
+        if phrase and pct is not None:
+            return f"Skipped to {phrase} ({pct}%)."
+        return f"Skipped to {phrase}." if phrase else "Skipped."
+
     # ---- play -------------------------------------------------------------
     if not source:
         return "What should I play?"
@@ -278,7 +327,10 @@ TOOL = {
         "If user wants to open a video on YouTube, he will tell you that specifically"
         "If user wants to play a video, then he wants to call this feature"
         "Plays a VIDEO on the assistant's own display, where the avatar "
-        "normally is — and stops it, mutes it or unmutes it. Use whenever the "
+        "normally is — and stops it, mutes it or unmutes it. It also "
+        "reports the position and seeks within a video playing "
+        "there: action position, seek_percent (50 = halfway), "
+        "seek_to with a timecode, seek_by with seconds. Use whenever the "
         "user wants to WATCH something on screen: 'play the new Dune trailer', "
         "'play that video', 'play C:/clips/holiday.mp4', 'put that YouTube "
         "video on the screen', 'stop the video', 'videoyu kapat', 'turn the "
@@ -305,7 +357,19 @@ TOOL = {
                 "type": "STRING",
                 "description": ("'play' (default), 'stop' to close it, 'unmute' "
                                 "to turn the sound on, 'mute' to silence it."),
-                "enum": ["play", "stop", "mute", "unmute"],
+                "enum": ["play", "stop", "mute", "unmute", "position", "seek_percent", "seek_to", "seek_by", "pause", "play_pause"],
+            },
+            "percent": {
+                "type": "NUMBER",
+                "description": "For action='seek_percent': 0-100 (50 = halfway).",
+            },
+            "timecode": {
+                "type": "STRING",
+                "description": "For action='seek_to': where to land, like '47:30'.",
+            },
+            "seconds": {
+                "type": "NUMBER",
+                "description": "For action='seek_by': seconds to move, negative to go back.",
             },
             "source": {
                 "type": "STRING",
