@@ -331,3 +331,46 @@ def test_greeting_for_is_time_aware_and_rotates():
     long_away = presence.greeting_for(14, 4 * 3600, 0)
     assert "gone a while" in long_away or "long time" in long_away \
         or "proper break" in long_away
+
+
+# ── Unprompted-speech gate (2026-10-24 live witness) ────────────────────
+# The state machine marked Alek away correctly and he still heard her:
+# the proactive check-in engine watches his speech clock, so his
+# absence is exactly what makes it fire — and it never consulted
+# presence. These tests pin the gate on every background voice loop.
+
+class _StubMonitor:
+    def __init__(self, present):
+        self.present = present
+
+
+def _bare_live():
+    import main
+    return main.JarvisLive.__new__(main.JarvisLive)
+
+
+def test_allows_speech_follows_the_registered_monitor():
+    live = _bare_live()
+    try:
+        presence.set_monitor(_StubMonitor(True))
+        assert live._presence_allows_speech() is True
+        presence.set_monitor(_StubMonitor(False))
+        assert live._presence_allows_speech() is False
+    finally:
+        presence.set_monitor(None)
+
+
+def test_allows_speech_fail_open_without_a_monitor():
+    live = _bare_live()
+    presence.set_monitor(None)
+    assert live._presence_allows_speech() is True
+
+
+def test_every_background_voice_loop_consults_the_gate():
+    import inspect
+
+    import main
+    for fn in ("_run_proactive_mode", "_run_system_monitor",
+               "_run_background_monitor"):
+        body = inspect.getsource(getattr(main.JarvisLive, fn))
+        assert "_presence_allows_speech" in body, fn

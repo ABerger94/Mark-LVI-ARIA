@@ -1170,6 +1170,22 @@ class JarvisLive:
         except Exception:
             return False
 
+    def _presence_allows_speech(self) -> bool:
+        """May she speak UNPROMPTED right now? Presence is the gate:
+        while Alek is away, every background voice path stays silent
+        — the proactive check-ins and the two monitor loops included,
+        not just the scheduler's alerts (live witness 2026-10-24: the
+        state machine marked him away correctly and the proactive
+        engine still asked the empty room about the Android app).
+        Fail-open, like everything presence touches: no monitor,
+        presence off, or any error answers yes — presence can only
+        ever silence her, never mute a conversation he is having."""
+        try:
+            from core import presence as _presence
+            return bool(_presence.is_present())
+        except Exception:
+            return True
+
     def _presence_on_away(self, reason: str) -> None:
         try:
             self.ui.write_log(
@@ -2851,6 +2867,8 @@ class JarvisLive:
                 speaking = self._is_speaking
             if speaking or (time.monotonic() - self._last_user_speech) < 10:
                 continue
+            if not self._presence_allows_speech():
+                continue
             try:
                 await self.session.send_client_content(
                     turns={"role": "user", "parts": [{"text": alert}]},
@@ -2870,7 +2888,8 @@ class JarvisLive:
                 with self._speaking_lock:
                     speaking = self._is_speaking
                 recent_speech = (time.monotonic() - self._last_user_speech) < 30
-                if not speaking and not recent_speech:
+                if (not speaking and not recent_speech
+                        and self._presence_allows_speech()):
                     try:
                         alerts = await asyncio.to_thread(monitor_check_all)
                         for alert in alerts:
@@ -2906,6 +2925,9 @@ class JarvisLive:
             with self._speaking_lock:
                 speaking = self._is_speaking
             if speaking:
+                continue
+
+            if not self._presence_allows_speech():
                 continue
 
             if not self._proactive.should_trigger(self._last_user_speech):
