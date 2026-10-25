@@ -1,10 +1,12 @@
-"""Phase H1 — task delegation (core/delegation.py + the three tools).
+"""Task delegation (core/delegation.py + the tools), Phase 2 engine.
 
 What is being pinned shut:
 
-  * a delegated task runs its model loop on a worker: tool calls
-    dispatch through the bound seam, the final text lands in the
-    record as the result, and task_status reads exactly that;
+  * a delegated task is planned first (a validated structured
+    plan), runs its steps through the bound dispatch seam,
+    checkpoints as it goes, and may only call itself DONE after
+    a separate verifier pass — the final step's text lands in
+    the record as the verified result;
   * the gate rule: a dispatch result carrying
     [CONFIRMATION_PENDING] stops the task as BLOCKED — the gated
     act is never executed by the task and never claimed done;
@@ -12,12 +14,14 @@ What is being pinned shut:
     queued) is the cap; the fifth delegation is refused, in words;
   * cancellation: a queued task is cancelled in the record and
     never runs; a running task stops between model turns;
-  * a task that cannot finish inside its turn cap fails honestly
-    instead of wandering;
-  * records left in flight by a dead process are closed out as
-    interrupted when the module is next bound;
-  * unbound, delegation refuses — it does not queue work nobody
-    can run.
+  * a task that cannot finish inside its turn budget fails
+    honestly instead of wandering;
+  * a model failure is retried, then parks the task as
+    blocked_model (F3) — it is NOT a terminal failure any more;
+  * a record left in flight by a dead process is resumed from
+    its checkpoint at bind (F1) — no longer closed out failed;
+  * unbound — or the engine switched off — delegation refuses:
+    it does not queue work nobody can run.
 """
 import json
 import threading
@@ -32,30 +36,63 @@ from core import delegation as dlg
 from core import incidents
 
 
+# ── a phase-aware fake model ────────────────────────────────────────────
+
+def phase_of(messages):
+    first = messages[0]["text"] if messages else ""
+    if first.startswith("Plan this background task"):
+        return "plan"
+    if first.startswith("You are the verifier"):
+        return "verify"
+    return "step"
+
+
+def make_model(plan=None, verdict="pass", gaps=None, step_fn=None,
+               plan_fn=None):
+    """A scripted model that speaks the engine's three phases.
+
+    plan: list of {title, done_when} (default one step).
+    step_fn(messages, n): reply for the n-th step-phase call.
+    plan_fn(messages, n): reply for the n-th planning call.
+    """
+    calls = {"plan": 0, "verify": 0, "step": 0}
+
+    def model(messages, decls):
+        phase = phase_of(messages)
+        calls[phase] += 1
+        if phase == "plan":
+            if plan_fn is not None:
+                return plan_fn(messages, calls["plan"])
+            steps = plan or [{"title": "Only step",
+                              "done_when": "it is done"}]
+            return (json.dumps({"steps": steps}), [])
+        if phase == "verify":
+            return (json.dumps({"verdict": verdict,
+                                 "gaps": gaps or []}), [])
+        if step_fn is not None:
+            return step_fn(messages, calls["step"])
+        return ("Step complete.", [])
+
+    model.calls = calls
+    return model
+
+
 @pytest.fixture()
 def bound(tmp_path, monkeypatch):
-    """Delegation bound to scripted seams, on a tmp store.
-
-    The fake model is a per-test script: a list of (text, calls)
-    replies consumed in order, or a callable(messages) -> reply.
-    """
+    """Delegation bound to scripted seams, on a tmp store."""
     store = tmp_path / "delegated_tasks.json"
     monkeypatch.setattr(dlg, "STORE_PATH", store)
+    monkeypatch.setattr(dlg, "_retry_delay_s", 0)
     monkeypatch.setattr(incidents, "INCIDENTS_PATH",
                         tmp_path / "incidents.jsonl")
     dlg.reset_for_tests()
-    seen = {"dispatches": [], "prompts": []}
+    seen = {"dispatches": [], "first_texts": []}
 
-    def make(script):
-        replies = script if callable(script) else list(script)
-
+    def make(model):
         def call_model(messages, decls):
-            seen["prompts"].append(messages[0]["text"]
-                                    if messages else "")
-            if callable(replies):
-                return replies(messages, decls)
-            return replies.pop(0) if replies else ("(no script)",
-                                                    [])
+            seen["first_texts"].append(messages[0]["text"]
+                                        if messages else "")
+            return model(messages, decls)
 
         def dispatch(name, args):
             seen["dispatches"].append((name, args))
@@ -86,20 +123,32 @@ def _wait_status(task_id, want, timeout=10.0):
 # ── the happy path ──────────────────────────────────────────────────────
 
 def test_task_runs_tools_and_records_the_result(bound):
-    seen = bound["make"]([
-        ("", [{"name": "ping", "args": {"x": 1}}]),
-        ("All done: the answer is 42.", []),
-    ])
+    plan = [{"title": "Gather", "done_when": "evidence collected"},
+            {"title": "Write up", "done_when": "draft complete"}]
+
+    def step_fn(messages, n):
+        first = messages[0]["text"]
+        if "Plan step 1 of" in first and n == 1:
+            return ("", [{"name": "ping", "args": {"x": 1}}])
+        if "Plan step 1 of" in first:
+            return ("Gathered the evidence.", [])
+        return ("All done: the answer is 42.", [])
+
+    seen = bound["make"](make_model(plan=plan, step_fn=step_fn))
     task_id, refusal = dlg.delegate("check the thing")
     assert refusal == "" and task_id == 1
     task = _wait_status(task_id, {"done"})
     assert task["result"] == "All done: the answer is 42."
+    assert task["verification"]["status"] == "passed"
+    assert [s["status"] for s in task["steps_state"]] == ["done",
+                                                          "done"]
     assert seen["dispatches"] == [("ping", {"x": 1})]
     assert task["started"] and task["finished"]
 
 
 def test_task_status_action_reads_the_record(bound):
-    bound["make"]([("Finished quietly.", [])])
+    bound["make"](make_model(
+        step_fn=lambda messages, n: ("Finished quietly.", [])))
     out = dt_action.delegate_task({"prompt": "do a thing"})
     assert out.startswith("status=done") and "task=1" in out
     _wait_status(1, {"done"})
@@ -109,37 +158,47 @@ def test_task_status_action_reads_the_record(bound):
     assert out.startswith("status=failed")
 
 
-def test_model_failure_fails_the_task_honestly(bound):
+def test_model_failure_parks_blocked_model_after_retries(bound,
+                                                         monkeypatch):
+    monkeypatch.setattr(dlg, "MODEL_RETRIES", 2)
+    attempts = {"n": 0}
+
     def boom(messages, decls):
+        attempts["n"] += 1
         raise RuntimeError("provider down")
+
     bound["make"](boom)
     task_id, _ = dlg.delegate("anything")
-    task = _wait_status(task_id, {"failed"})
-    assert "provider down" in task["result"]
+    task = _wait_status(task_id, {"blocked_model"})
+    assert attempts["n"] == 3          # first try + 2 retries
+    assert "provider down" in task["blocked_reason"]
+    assert task["finished"] is None    # parked, not finished
 
 
 # ── the gate rule ───────────────────────────────────────────────────────
 
 def test_gated_call_blocks_the_task_and_executes_nothing(bound):
-    seen = bound["make"]([
-        ("", [{"name": "gated_thing", "args": {}}]),
-        ("this reply must never be consumed", []),
-    ])
+    model = make_model(step_fn=lambda messages, n:
+                       ("", [{"name": "gated_thing", "args": {}}]))
+    seen = bound["make"](model)
     task_id, _ = dlg.delegate("do the gated thing")
     task = _wait_status(task_id, {"blocked"})
     assert "confirmation gate" in task["result"]
     assert "gated_thing" in task["result"]
-    # the model got exactly one turn — the loop stopped at the gate
-    assert len(seen["prompts"]) == 1
+    # plan + exactly one step turn — the loop stopped at the gate
+    assert model.calls == {"plan": 1, "verify": 0, "step": 1}
+    assert seen["dispatches"] == [("gated_thing", {})]
 
 
 # ── concurrency + cancellation ──────────────────────────────────────────
 
 def _blocking_model(release):
-    def call_model(messages, decls):
+    inner = make_model()
+
+    def model(messages, decls):
         release.wait(timeout=10)
-        return ("released", [])
-    return call_model
+        return inner(messages, decls)
+    return model
 
 
 def test_concurrency_bound_refuses_the_fifth(bound):
@@ -172,22 +231,22 @@ def test_cancel_queued_task_never_runs(bound):
     _wait_status(first, {"done"})
     _wait_status(second, {"done"})
     time.sleep(0.3)   # a worker slot freed — the cancelled task
-    assert "queued job" not in seen["prompts"]   # still never ran
+    assert not any("queued job" in t for t in seen["first_texts"])
     assert dlg.get_task(queued)["status"] == "cancelled"
 
 
 def test_cancel_running_task_stops_between_turns(bound):
     gate = threading.Event()
-    calls = {"n": 0}
+    state = {"step": 0}
 
-    def call_model(messages, decls):
-        calls["n"] += 1
-        if calls["n"] == 1:
+    def step_fn(messages, n):
+        state["step"] += 1
+        if state["step"] == 1:
             return ("", [{"name": "ping", "args": {}}])
         gate.wait(timeout=10)      # second turn waits to be released
         return ("", [{"name": "ping", "args": {}}])
 
-    bound["make"](call_model)
+    bound["make"](make_model(step_fn=step_fn))
     task_id, _ = dlg.delegate("long job")
     _wait_status(task_id, {"running"})
     ok, message = dlg.cancel(task_id)
@@ -198,7 +257,7 @@ def test_cancel_running_task_stops_between_turns(bound):
 
 
 def test_cancel_terminal_or_unknown_is_reported(bound):
-    bound["make"]([("done already", [])])
+    bound["make"](make_model())
     task_id, _ = dlg.delegate("quick")
     _wait_status(task_id, {"done"})
     ok, message = dlg.cancel(task_id)
@@ -212,15 +271,16 @@ def test_cancel_terminal_or_unknown_is_reported(bound):
 # ── caps, staleness, refusal ────────────────────────────────────────────
 
 def test_turn_cap_stops_a_wandering_task(bound, monkeypatch):
-    monkeypatch.setattr(dlg, "MAX_TURNS", 3)
-    bound["make"](lambda messages, decls: ("", [{"name": "ping",
-                                           "args": {}}]))
+    monkeypatch.setattr(dlg, "MAX_TURNS", 4)
+    bound["make"](make_model(
+        step_fn=lambda messages, n: ("", [{"name": "ping",
+                                            "args": {}}])))
     task_id, _ = dlg.delegate("wander")
     task = _wait_status(task_id, {"failed"})
-    assert "tool turns" in task["result"]
+    assert "model turns" in task["result"]
 
 
-def test_stale_records_close_out_at_bind(bound):
+def test_stale_records_resume_at_bind(bound):
     bound["store"].write_text(json.dumps({
         "next_id": 3,
         "tasks": [
@@ -232,10 +292,9 @@ def test_stale_records_close_out_at_bind(bound):
              "finished": 3.0},
         ]}), encoding="utf-8")
     dlg.reset_for_tests()          # fresh process, nothing bound yet
-    bound["make"]([("ok", [])])    # the bind closes the stale record
-    stale = dlg.get_task(1)
-    assert stale["status"] == "failed"
-    assert "Interrupted" in stale["result"]
+    bound["make"](make_model())    # the bind resumes the stale task
+    task = _wait_status(1, {"done"})
+    assert task["prompt"] == "old running"
     assert dlg.get_task(2)["result"] == "kept"   # history untouched
 
 
@@ -248,7 +307,15 @@ def test_unbound_delegation_refuses(tmp_path, monkeypatch):
     assert out.startswith("status=failed")
 
 
+def test_engine_switched_off_refuses(bound, monkeypatch):
+    bound["make"](make_model())
+    monkeypatch.setattr(dlg, "_settings",
+                        lambda: {"task_engine_enabled": False})
+    task_id, refusal = dlg.delegate("while disabled")
+    assert task_id is None and "switched off" in refusal
+
+
 def test_empty_prompt_refuses(bound):
-    bound["make"]([])
+    bound["make"](make_model())
     task_id, refusal = dlg.delegate("   ")
     assert task_id is None and "empty" in refusal

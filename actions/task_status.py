@@ -38,10 +38,13 @@ TOOL = {
     "name": "task_status",
     "description": (
         "Read a background (delegated) task's record: its status "
-        "(queued, running, done, failed, blocked at the "
-        "confirmation gate, cancelled), its prompt, and its result "
-        "when finished. Pass task_id for one task; omit it to list "
-        "the most recent tasks."
+        "(queued, running, done, done_unverified, failed, "
+        "cancelled, or blocked — at the confirmation gate, "
+        "blocked_model, blocked_input, blocked_unknown), its "
+        "prompt, its plan and step progress, its last checkpoint, "
+        "any blocked reason, its verification status, and its "
+        "result when finished. Pass task_id for one task; omit "
+        "it to list the most recent tasks."
     ),
     "brief": "Check a background task ('task_id', optional).",
     "tier": "extra",

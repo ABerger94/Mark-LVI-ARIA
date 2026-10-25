@@ -89,7 +89,13 @@ RECENT_CAP = 30          # finished calls kept in the registry tail
 DETAIL_LIMIT = 120       # a shell command's visible length
 GOAL_LIMIT = 60          # a delegated goal's visible length
 
-_ACTIVE_DELEGATED = ("queued", "running", "blocked")
+# Blocked tasks count as active here in the attention sense, not
+# the worker sense: they hold no thread, but they are unfinished
+# business Alek may need to see (Phase 2's blocked_model /
+# blocked_input / blocked_unknown join the original gate block).
+_ACTIVE_DELEGATED = ("queued", "running", "blocked",
+                     "blocked_model", "blocked_input",
+                     "blocked_unknown")
 
 
 # ── The activity registry ────────────────────────────────────────────────
@@ -256,6 +262,7 @@ def _delegated_rows(now: float) -> list[dict]:
                 elapsed = max(0.0, float(finished) - float(started))
             else:
                 elapsed = 0.0
+            verification = t.get("verification")
             rows.append({
                 "id": t.get("id"),
                 "goal": str(t.get("prompt") or ""),
@@ -265,6 +272,15 @@ def _delegated_rows(now: float) -> list[dict]:
                 "started": t.get("started"),
                 "finished": finished,
                 "elapsed": elapsed,
+                # Phase 2 engine state, as the record carries it
+                # (legacy records simply leave these empty).
+                "progress": delegation._progress_text(t),
+                "blocked_reason":
+                    str(t.get("blocked_reason") or "")[:120],
+                "verify_status":
+                    str(verification.get("status") or "")
+                    if isinstance(verification, dict) else "",
+                "checkpoint_at": t.get("checkpoint_at"),
             })
         except Exception:
             continue
@@ -488,9 +504,14 @@ def render_text(snap: dict = None) -> str:
                      "working in the background, it will "
                      "appear here.")
     for r in active:
-        lines.append(f"  #{r['id']} [{r['status']}] "
-                     f"{r['goal'][:GOAL_LIMIT]}"
-                     f" — {_fmt_elapsed(r['elapsed'])}")
+        line = (f"  #{r['id']} [{r['status']}] "
+                f"{r['goal'][:GOAL_LIMIT]}"
+                f" — {_fmt_elapsed(r['elapsed'])}")
+        if r.get("progress"):
+            line += f" — {r['progress']}"
+        if r.get("blocked_reason"):
+            line += f" — blocked: {r['blocked_reason']}"
+        lines.append(line)
     for r in snap["inflight"]:
         detail = f" — {r['detail']}" if r["detail"] else ""
         lines.append(f"  {r['tool']}{detail}"
@@ -499,9 +520,12 @@ def render_text(snap: dict = None) -> str:
         lines.append("")
         lines.append("  Recent background tasks:")
         for r in finished[:3]:
-            lines.append(f"  #{r['id']} [{r['status']}] "
-                         f"{r['goal'][:GOAL_LIMIT]}"
-                         f" — {_fmt_duration(r['elapsed'])}")
+            line = (f"  #{r['id']} [{r['status']}] "
+                    f"{r['goal'][:GOAL_LIMIT]}"
+                    f" — {_fmt_duration(r['elapsed'])}")
+            if r.get("verify_status"):
+                line += f" — verified: {r['verify_status']}"
+            lines.append(line)
 
     # ── SHELL ────────────────────────────────────────────────
     if snap["shell"]:

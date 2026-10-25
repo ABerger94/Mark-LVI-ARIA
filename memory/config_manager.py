@@ -570,6 +570,21 @@ def get_consolidation_settings() -> dict:
     }
 
 
+# ── Background task engine ────────────────────────────────────────────
+# The long-horizon delegation engine (core/delegation.py, Phase 2):
+# planned, checkpointed background tasks with verification. On by
+# default, with the off-switch here: when this is false,
+# delegate_task refuses with the reason rather than quietly
+# queueing work nobody will run, and tasks already in flight keep
+# the engine they started with — the switch gates new work only.
+def get_task_engine_settings() -> dict:
+    data = load_api_keys()
+    return {
+        "task_engine_enabled":
+            bool(data.get("task_engine_enabled", True)),
+    }
+
+
 # ── Main-process watchdog ──────────────────────────────────────────────
 # Whether the watchdog supervises the two loops (core/watchdog.py):
 # a loop silent past the stale threshold is restarted, at most three
